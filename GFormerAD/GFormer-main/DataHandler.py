@@ -15,11 +15,11 @@ class DataHandler:
     def __init__(self):
         self.device = "cuda:"+str(args.gpu)
         if args.data == 'yelp':
-            predir = '/raid/home/labuserothmani/GFormerAD/Datasets/sparse_yelp/'
+            predir = '../Datasets/sparse_yelp/'
         elif args.data == 'ifashion':
-            predir = '/raid/home/labuserothmani/GFormerAD/Datasets/ifashion/'
+            predir = '../Datasets/ifashion/'
         elif args.data == 'lastfm':
-            predir = '/raid/home/labuserothmani/GFormerAD/Datasets/lastfm/'
+            predir = '../Datasets/lastfm/'
         self.predir = predir
         self.trnfile = predir + 'trnMat.pkl'
         self.tstfile = predir + 'tstMat.pkl'

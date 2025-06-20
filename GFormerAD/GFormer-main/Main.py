@@ -64,7 +64,7 @@ class Coach:
             print()
         reses = self.testEpoch()
         result.append(reses)
-        torch.save(result, "/raid/home/labuserothmani/GFormerAD/Saeg_result.pkl")
+        torch.save(result, "../Saeg_result.pkl")
         log(self.makePrint('Test', args.epoch, reses, True))
         log(self.makePrint('Best Result', args.epoch, bestRes, True))
         self.saveHistory()
@@ -249,21 +249,21 @@ class Coach:
     def saveHistory(self):
         if args.epoch == 0:
             return
-        with open('/raid/home/labuserothmani/GFormerAD/GFormer-main/History/' + args.save_path + '.his', 'wb') as fs:
+        with open('History/' + args.save_path + '.his', 'wb') as fs:
             pickle.dump(self.metrics, fs)
 
         content = {
             'model': self.model,
         }
-        t.save(content, '/raid/home/labuserothmani/GFormerAD/GFormer-main/Models/' + args.save_path + '.mod')
+        t.save(content, 'Models/' + args.save_path + '.mod')
         log('Model Saved: %s' % args.save_path)
 
     def loadModel(self):
-        ckp = t.load('/raid/home/labuserothmani/GFormerAD/GFormer-main/Models/' + args.load_model + '.mod')
+        ckp = t.load('Models/' + args.load_model + '.mod')
         self.model = ckp['model']
         self.opt = t.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
 
-        with open('/raid/home/labuserothmani/GFormerAD/GFormer-main/History/' + args.load_model + '.his', 'rb') as fs:
+        with open('History/' + args.load_model + '.his', 'rb') as fs:
             self.metrics = pickle.load(fs)
         log('Model Loaded')
 if __name__ == '__main__':
