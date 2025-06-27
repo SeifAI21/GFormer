@@ -11,6 +11,8 @@ import torch.utils.data as dataloader
 import networkx as nx
 import os
 
+
+
 class DataHandler:
     def __init__(self):
         self.device = "cuda:"+str(args.gpu)
@@ -22,8 +24,8 @@ class DataHandler:
             predir = '../Datasets/ifashion/'
         elif args.data == 'lastfm':
             predir = '../Datasets/lastfm/'
-        elif args.data == 'Declic_data':
-            predir = '../content/Declic/'
+        elif args.data == 'Declic':
+            predir = '../Datasets/Declic/'
         else:
             raise ValueError(f"Unknown data key: {args.data}")
 
