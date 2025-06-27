@@ -9,21 +9,29 @@ import torch as t
 import torch.utils.data as data
 import torch.utils.data as dataloader
 import networkx as nx
-
+import os
 
 class DataHandler:
     def __init__(self):
         self.device = "cuda:"+str(args.gpu)
+        predir = None
+
         if args.data == 'yelp':
             predir = '../Datasets/sparse_yelp/'
         elif args.data == 'ifashion':
             predir = '../Datasets/ifashion/'
         elif args.data == 'lastfm':
             predir = '../Datasets/lastfm/'
-        self.predir = predir
-        self.trnfile = predir + 'trnMat.pkl'
-        self.tstfile = predir + 'tstMat.pkl'
-        self.valfile = predir + 'valMat.pkl'
+        elif args.data == 'Declic_data':
+            predir = '../content/Declic/'
+        else:
+            raise ValueError(f"Unknown data key: {args.data}")
+
+        self.predir = predir  # Now always defined
+        self.trnfile = os.path.join(predir, 'trnMat.pkl')
+        self.valfile = os.path.join(predir, 'valMat.pkl')
+        self.tstfile = os.path.join(predir, 'tstMat.pkl')
+
 
    # def single_source_shortest_path_length_range(self, graph, node_range, cutoff):  # 最短路径算法
         #dists_dict = {}
