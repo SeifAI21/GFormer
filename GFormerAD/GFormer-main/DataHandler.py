@@ -26,8 +26,11 @@ class DataHandler:
             predir = '../Datasets/lastfm/'
         elif args.data == 'Declic':
             predir = '../Datasets/Declic/'
+        elif args.data == 'Declic_Augmented':
+            predir = '../Datasets/Declic_Augmented/'
         else:
             raise ValueError(f"Unknown data key: {args.data}")
+
 
         self.predir = predir  # Now always defined
         self.trnfile = os.path.join(predir, 'trnMat.pkl')
