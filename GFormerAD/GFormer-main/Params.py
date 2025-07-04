@@ -38,6 +38,17 @@ def ParseArgs():
     parser.add_argument('--eps', default=0.1, type=float, help='scaled weight as reward')
     parser.add_argument('--approximate', dest='approximate', default=-1, type=int, help='k-hop shortest path distance')
     parser.add_argument('--T', type=float, default=2.0, help='Temperature for distillation')
+    
+    # ===== CHECKPOINTING PARAMETERS =====
+    parser.add_argument('--resume', default=False, action='store_true', help='Resume from latest checkpoint')
+    parser.add_argument('--load_checkpoint', default=None, type=str, help='Path to specific checkpoint to load')
+    parser.add_argument('--load_best', default=False, action='store_true', help='Load best checkpoint instead of latest')
+    parser.add_argument('--save_freq', default=10, type=int, help='Frequency of saving checkpoints (epochs)')
+    parser.add_argument('--keep_checkpoints', default=5, type=int, help='Number of regular checkpoints to keep')
+    parser.add_argument('--checkpoint_dir', default='Checkpoints', type=str, help='Directory to save checkpoints')
+    parser.add_argument('--save_weights_freq', default=20, type=int, help='Frequency of saving model weights (epochs)')
+    parser.add_argument('--auto_save', default=True, action='store_true', help='Enable automatic checkpoint saving')
+    parser.add_argument('--save_best_only', default=False, action='store_true', help='Only save checkpoints when performance improves')
 
     return parser.parse_args()
 
