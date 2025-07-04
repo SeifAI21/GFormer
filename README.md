@@ -9,7 +9,7 @@ A Graph Transformer for Recommendation Systems with comprehensive checkpointing 
 - **Resume training** from any checkpoint
 - **Best model tracking** based on performance metrics
 - **Lightweight model weights** for inference
-- **Kaggle-friendly** persistent training
+- **Cloud-friendly** persistent training
 
 ## 📋 Table of Contents
 
@@ -18,7 +18,7 @@ A Graph Transformer for Recommendation Systems with comprehensive checkpointing 
 3. [Training](#training)
 4. [Checkpointing Guide](#checkpointing-guide)
 5. [Resume Training](#resume-training)
-6. [Kaggle Usage](#kaggle-usage)
+6. [Cloud Usage](#cloud-usage)
 7. [Parameters](#parameters)
 
 ## 🛠️ Installation
@@ -31,12 +31,12 @@ pip install -r requirements.txt
 
 ## 📊 Data Preparation
 
-### Using Your Own Dataset (e.g., Declic_Augmented)
+### Using Your Own Dataset
 
 1. **Prepare your data** using the data processing notebook
 2. **Place dataset files** in the correct directory:
 ```
-GFormerAD/Datasets/Declic_Augmented/
+GFormerAD/Datasets/YourDataset/
 ├── trnMat.pkl    # Training matrix
 ├── tstMat.pkl    # Test matrix
 ├── valMat.pkl    # Validation matrix
@@ -47,12 +47,12 @@ GFormerAD/Datasets/Declic_Augmented/
 
 ### Basic Training (From Scratch)
 ```bash
-python Main.py --data Declic_Augmented --epoch 100
+python Main.py --data YourDataset --epoch 100
 ```
 
 ### Training with Custom Parameters
 ```bash
-python Main.py --data Declic_Augmented \
+python Main.py --data YourDataset \
                --epoch 100 \
                --lr 0.001 \
                --batch 4096 \
@@ -105,51 +105,51 @@ GFormer-main/
 
 ### Resume from Latest Checkpoint
 ```bash
-python Main.py --data Declic_Augmented --epoch 100 --resume
+python Main.py --data YourDataset --epoch 100 --resume
 ```
 
 ### Resume from Specific Checkpoint
 ```bash
-python Main.py --data Declic_Augmented \
+python Main.py --data YourDataset \
                --epoch 100 \
                --load_checkpoint Checkpoints/checkpoint_epoch_30.pth
 ```
 
 ### Resume from Best Checkpoint
 ```bash
-python Main.py --data Declic_Augmented --epoch 100 --load_best
+python Main.py --data YourDataset --epoch 100 --load_best
 ```
 
 ### Load Only Model Weights (for Inference)
 ```bash
-python Main.py --data Declic_Augmented \
+python Main.py --data YourDataset \
                --load_checkpoint Models/weights_epoch_50.pth \
                --epoch 0  # No training, just evaluation
 ```
 
-## 🏆 Kaggle Usage
+## ☁️ Cloud Usage
 
-Perfect for Kaggle's time-limited environment!
+Perfect for cloud environments with time limitations!
 
 ### Initial Training Session
 ```bash
-python Main.py --data Declic_Augmented \
+python Main.py --data YourDataset \
                --epoch 100 \
                --save_freq 5 \
                --keep_checkpoints 10
 ```
 
-### When Kaggle Session Ends
+### When Cloud Session Ends
 1. **Download checkpoint files** from the output
-2. **Start new Kaggle session**
+2. **Start new cloud session**
 3. **Upload checkpoint files** to the new session
 4. **Resume training:**
 
 ```bash
-python Main.py --data Declic_Augmented --epoch 100 --resume
+python Main.py --data YourDataset --epoch 100 --resume
 ```
 
-### Kaggle Pro Tips
+### Cloud Pro Tips
 - Set `--save_freq 5` for frequent saves
 - Set `--keep_checkpoints 10` to keep more backups
 - Always download both `latest_checkpoint.pth` and `best_checkpoint_*.pth`
@@ -159,7 +159,7 @@ python Main.py --data Declic_Augmented --epoch 100 --resume
 
 ### Core Training Parameters
 ```bash
---data          # Dataset name (e.g., 'Declic_Augmented')
+--data          # Dataset name (e.g., 'YourDataset')
 --epoch         # Number of training epochs (default: 100)
 --lr            # Learning rate (default: 0.001)
 --batch         # Batch size (default: 4096)
@@ -194,12 +194,12 @@ python Main.py --data Declic_Augmented --epoch 100 --resume
 
 ### 1. Quick Experimentation
 ```bash
-python Main.py --data Declic_Augmented --epoch 50 --save_freq 10
+python Main.py --data YourDataset --epoch 50 --save_freq 10
 ```
 
 ### 2. Long Training with Frequent Saves
 ```bash
-python Main.py --data Declic_Augmented \
+python Main.py --data YourDataset \
                --epoch 200 \
                --save_freq 5 \
                --keep_checkpoints 20
@@ -207,14 +207,14 @@ python Main.py --data Declic_Augmented \
 
 ### 3. Resume Long Training
 ```bash
-python Main.py --data Declic_Augmented \
+python Main.py --data YourDataset \
                --epoch 200 \
                --resume
 ```
 
 ### 4. Fine-tuning from Best Model
 ```bash
-python Main.py --data Declic_Augmented \
+python Main.py --data YourDataset \
                --epoch 50 \
                --load_best \
                --lr 0.0001  # Lower learning rate for fine-tuning
@@ -262,7 +262,7 @@ python -c "import torch; print(torch.load('Checkpoints/latest_checkpoint.pth')['
 2. **Prepare your dataset** (see Data Preparation)
 3. **Start training:**
    ```bash
-   python Main.py --data Declic_Augmented --epoch 100
+   python Main.py --data YourDataset --epoch 100
    ```
 4. **Monitor training** and checkpoints will be saved automatically
 5. **Resume anytime** with `--resume` if interrupted
