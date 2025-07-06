@@ -252,11 +252,13 @@ class Coach:
         bestRes = None
         result = []
         
-        # FIXED: Handle evaluation-only mode (epoch=0)
+        # FIXED: Handle evaluation-only mode (epoch=0) with better error handling
         if args.epoch == 0:
             log('Evaluation-only mode (epoch=0)')
             if not checkpoint_loaded:
-                log('WARNING: No checkpoint loaded for evaluation!')
+                log('ERROR: No checkpoint loaded for evaluation!')
+                log('Please provide a valid checkpoint path using --load_checkpoint')
+                log('Example: --load_checkpoint /path/to/your/checkpoint.pth')
                 return
             
             # Set models to evaluation mode
@@ -267,12 +269,20 @@ class Coach:
             reses = self.testEpoch()
             log(self.makePrint('Evaluation', 0, reses, True))
             
+            # FIXED: Set bestRes for evaluation-only mode
+            bestRes = reses
+            
             # Save evaluation results
             torch.save([reses], f"Evaluation_result_{args.data}.pkl")
             log('Evaluation completed and results saved')
+            
+            # FIXED: Print best results for evaluation-only mode
+            if bestRes is not None:
+                log(self.makePrint('Best Result', 0, bestRes, True))
+            
             return
         
-        # FIXED: Regular training loop with proper checkpointing
+        # Rest of the training loop remains the same...
         for ep in range(self.start_epoch, args.epoch):
             # Set models to training mode
             self.model.train()
@@ -300,14 +310,14 @@ class Coach:
                     self.best_ndcg = reses['NDCG']
                     bestRes = reses
                 
-                # FIXED: Save checkpoint based on save_freq parameter
+                # Save checkpoint based on save_freq parameter
                 if hasattr(args, 'save_freq') and (ep % args.save_freq == 0 or is_best):
                     self.save_checkpoint(ep, is_best=is_best)
                 else:
                     # Default behavior - save every test epoch
                     self.save_checkpoint(ep, is_best=is_best)
                 
-                # FIXED: Save model weights based on save_weights_freq parameter
+                # Save model weights based on save_weights_freq parameter
                 if hasattr(args, 'save_weights_freq') and (ep % args.save_weights_freq == 0):
                     self.save_model_weights(ep)
                 elif ep % (args.tstEpoch * 2) == 0:
@@ -320,7 +330,7 @@ class Coach:
                 if bestRes is None:
                     bestRes = reses
             
-            # FIXED: Save checkpoint every save_freq epochs (not just test epochs)
+            # Save checkpoint every save_freq epochs (not just test epochs)
             elif hasattr(args, 'save_freq') and (ep % args.save_freq == 0):
                 self.save_checkpoint(ep, is_best=False)
             elif ep % 10 == 0:
