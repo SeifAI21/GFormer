@@ -12,14 +12,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 import json
 from datetime import datetime
+import numpy as np
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+import torch as t
 
 
 class Coach:
     def __init__(self, handler):
         self.handler = handler
         self.distill_weight = 0.1
-        self.ResidualGTLayer=ResidualGTLayer()
+        self.ResidualGTLayer = ResidualGTLayer()
         print('USER', args.user, 'ITEM', args.item)
         print('NUM OF INTERACTIONS', self.handler.trnLoader.dataset.__len__())
         self.metrics = dict()
@@ -78,7 +80,10 @@ class Coach:
         torch.save(checkpoint, latest_checkpoint_path)
         
         # Keep only last N checkpoints to save space
-        self.cleanup_old_checkpoints(keep_last=5)
+        if hasattr(args, 'keep_checkpoints'):
+            self.cleanup_old_checkpoints(keep_last=args.keep_checkpoints)
+        else:
+            self.cleanup_old_checkpoints(keep_last=5)
 
     def cleanup_old_checkpoints(self, keep_last=5):
         """Remove old checkpoints to save disk space"""
@@ -99,12 +104,16 @@ class Coach:
             log(f'Error cleaning up checkpoints: {e}')
 
     def load_checkpoint(self, checkpoint_path=None, load_best=False):
-        """Load checkpoint from file"""
+        """Load checkpoint from file - UPDATED FOR EVALUATION MODE"""
         if checkpoint_path is None:
             if load_best:
                 # Find the best checkpoint
+                if not os.path.exists(self.best_checkpoint_dir):
+                    log('Best checkpoint directory does not exist')
+                    return False
+                    
                 best_files = [f for f in os.listdir(self.best_checkpoint_dir) 
-                             if f.startswith('best_checkpoint_') and f.endswith('.pth')]
+                            if f.startswith('best_checkpoint_') and f.endswith('.pth')]
                 if best_files:
                     best_files.sort(key=lambda x: int(x.split('_')[3].split('.')[0]), reverse=True)
                     checkpoint_path = os.path.join(self.best_checkpoint_dir, best_files[0])
@@ -125,8 +134,14 @@ class Coach:
             # Load model states
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.distill_model.load_state_dict(checkpoint['distill_model_state_dict'])
-            self.opt.load_state_dict(checkpoint['optimizer_state_dict'])
             self.gtLayer.load_state_dict(checkpoint['gtLayer_state_dict'])
+            
+            # FIXED: Only load optimizer if we're training (epoch > 0)
+            if args.epoch > 0:
+                self.opt.load_state_dict(checkpoint['optimizer_state_dict'])
+                log('Optimizer state loaded for training')
+            else:
+                log('Optimizer state skipped for evaluation-only mode')
             
             # Load training progress
             self.metrics = checkpoint['metrics']
@@ -135,8 +150,19 @@ class Coach:
             self.start_epoch = checkpoint['epoch'] + 1
             
             log(f'Checkpoint loaded: {checkpoint_path}')
-            log(f'Resuming from epoch {self.start_epoch}')
-            log(f'Best Recall: {self.best_recall:.4f}, Best NDCG: {self.best_ndcg:.4f}')
+            log(f'Original epoch: {checkpoint["epoch"]}')
+            log(f'Best Recall in checkpoint: {self.best_recall:.4f}')
+            log(f'Best NDCG in checkpoint: {self.best_ndcg:.4f}')
+            
+            # FIXED: Set appropriate mode based on whether we're training or evaluating
+            if args.epoch == 0:
+                self.model.eval()
+                self.distill_model.eval()
+                log('Models set to evaluation mode')
+            else:
+                self.model.train()
+                self.distill_model.train()
+                log('Models set to training mode')
             
             return True
             
@@ -186,32 +212,84 @@ class Coach:
         self.prepareModel()
         log('Model Prepared')
         
-        # Load checkpoint if specified
-        if args.load_model != None:
-            if self.load_checkpoint(args.load_model):
-                log('Checkpoint loaded successfully')
+        # FIXED: Updated checkpoint loading logic to handle new parameters
+        checkpoint_loaded = False
+        
+        if hasattr(args, 'load_checkpoint') and args.load_checkpoint:
+            # Load specific checkpoint file
+            checkpoint_loaded = self.load_checkpoint(args.load_checkpoint)
+            if checkpoint_loaded:
+                log('Specific checkpoint loaded successfully')
+                log(f'Loaded from: {args.load_checkpoint}')
             else:
-                log('Failed to load checkpoint, starting fresh')
+                log('Failed to load specific checkpoint, starting fresh')
+        
+        elif hasattr(args, 'load_best') and args.load_best:
+            # Load best checkpoint
+            checkpoint_loaded = self.load_checkpoint(load_best=True)
+            if checkpoint_loaded:
+                log('Best checkpoint loaded successfully')
+            else:
+                log('No best checkpoint found, starting fresh')
+        
         elif hasattr(args, 'resume') and args.resume:
-            if self.load_checkpoint():
+            # Resume from latest checkpoint
+            checkpoint_loaded = self.load_checkpoint()
+            if checkpoint_loaded:
                 log('Resumed from latest checkpoint')
             else:
                 log('No checkpoint found, starting fresh')
+        
+        elif args.load_model != None:
+            # Legacy model loading
+            self.loadModel()
+            checkpoint_loaded = True
+            log('Legacy model loaded successfully')
+        
         else:
             log('Model Initialized')
         
         bestRes = None
         result = []
         
+        # FIXED: Handle evaluation-only mode (epoch=0)
+        if args.epoch == 0:
+            log('Evaluation-only mode (epoch=0)')
+            if not checkpoint_loaded:
+                log('WARNING: No checkpoint loaded for evaluation!')
+                return
+            
+            # Set models to evaluation mode
+            self.model.eval()
+            self.distill_model.eval()
+            
+            # Run evaluation
+            reses = self.testEpoch()
+            log(self.makePrint('Evaluation', 0, reses, True))
+            
+            # Save evaluation results
+            torch.save([reses], f"Evaluation_result_{args.data}.pkl")
+            log('Evaluation completed and results saved')
+            return
+        
+        # FIXED: Regular training loop with proper checkpointing
         for ep in range(self.start_epoch, args.epoch):
+            # Set models to training mode
+            self.model.train()
+            self.distill_model.train()
+            
             tstFlag = (ep % args.tstEpoch == 0)
             reses = self.trainEpoch()
             log(self.makePrint('Train', ep, reses, tstFlag))
             
             if tstFlag:
+                # Set models to evaluation mode for validation/testing
+                self.model.eval()
+                self.distill_model.eval()
+                
                 reses = self.valEpoch()
                 log(self.makePrint('Validation', ep, reses, tstFlag))
-          
+        
                 reses = self.testEpoch()
                 log(self.makePrint('Test', ep, reses, tstFlag))
                 
@@ -222,11 +300,18 @@ class Coach:
                     self.best_ndcg = reses['NDCG']
                     bestRes = reses
                 
-                # Save checkpoint
-                self.save_checkpoint(ep, is_best=is_best)
+                # FIXED: Save checkpoint based on save_freq parameter
+                if hasattr(args, 'save_freq') and (ep % args.save_freq == 0 or is_best):
+                    self.save_checkpoint(ep, is_best=is_best)
+                else:
+                    # Default behavior - save every test epoch
+                    self.save_checkpoint(ep, is_best=is_best)
                 
-                # Save model weights every few epochs
-                if ep % (args.tstEpoch * 2) == 0:
+                # FIXED: Save model weights based on save_weights_freq parameter
+                if hasattr(args, 'save_weights_freq') and (ep % args.save_weights_freq == 0):
+                    self.save_model_weights(ep)
+                elif ep % (args.tstEpoch * 2) == 0:
+                    # Default behavior
                     self.save_model_weights(ep)
                 
                 self.saveHistory()
@@ -235,33 +320,46 @@ class Coach:
                 if bestRes is None:
                     bestRes = reses
             
-            # Save checkpoint every few epochs (not just test epochs)
-            if ep % 10 == 0:
+            # FIXED: Save checkpoint every save_freq epochs (not just test epochs)
+            elif hasattr(args, 'save_freq') and (ep % args.save_freq == 0):
+                self.save_checkpoint(ep, is_best=False)
+            elif ep % 10 == 0:
+                # Default behavior
                 self.save_checkpoint(ep, is_best=False)
             
             print()
         
-        # Final evaluation and save
-        reses = self.testEpoch()
-        result.append(reses)
-        
-        # Save final checkpoint and results
-        self.save_checkpoint(args.epoch - 1, is_final=True)
-        torch.save(result, "Saeg_result.pkl")
-        
-        log(self.makePrint('Test', args.epoch, reses, True))
-        log(self.makePrint('Best Result', args.epoch, bestRes, True))
-        self.saveHistory()
+        # Final evaluation and save (only for training mode)
+        if args.epoch > 0:
+            # Set models to evaluation mode for final test
+            self.model.eval()
+            self.distill_model.eval()
+            
+            reses = self.testEpoch()
+            result.append(reses)
+            
+            # Save final checkpoint and results
+            self.save_checkpoint(args.epoch - 1, is_final=True)
+            torch.save(result, "Saeg_result.pkl")
+            
+            log(self.makePrint('Test', args.epoch, reses, True))
+            
+            # FIXED: Only print best results if bestRes exists
+            if bestRes is not None:
+                log(self.makePrint('Best Result', args.epoch, bestRes, True))
+            else:
+                log('No best result available (training was too short)')
+            
+            self.saveHistory()
 
     def prepareModel(self):
         self.gtLayer = GTLayer().cuda()
         self.model = Model(self.ResidualGTLayer).cuda()
         self.distill_model = Model(self.ResidualGTLayer).cuda()
-        self.opt = t.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
         self.masker = RandomMaskSubgraphs(args.user, args.item)
         self.sampler = LocalGraph(self.gtLayer)
 
-    # ... rest of your existing methods remain the same ...
     def trainEpoch(self):
         trnLoader = self.handler.trnLoader
         trnLoader.dataset.negSampling()
@@ -315,9 +413,8 @@ class Coach:
 
             # Utilisez la perte de distillation pour la mise à jour du modèle
             loss = bprLoss + regLoss + contrastLoss + args.b2 * bprLoss2 + distill_loss
-            #loss = regLoss + contrastLoss + distill_loss
             epLoss += loss.item()
-            #epPreLoss += bprLoss.item()
+            epPreLoss += bprLoss.item()
             self.opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=20, norm_type=2)
@@ -334,11 +431,10 @@ class Coach:
         return ret
     
     def valEpoch(self):
-        valLoader = self.handler.valLoader  # Assurez-vous d'avoir un DataLoader pour les données de validation
+        valLoader = self.handler.valLoader
         epLoss, epPreLoss = 0, 0
-       # epRecall, epNdcg = 0, 0 
         steps = valLoader.dataset.__len__() // args.batch
-        with torch.no_grad():  # Pas besoin de calculer les gradients pendant la validation
+        with torch.no_grad():
             for i, tem in enumerate(valLoader):
                 if i % args.fixSteps == 0:
                     att_edge, add_adj = self.sampler(self.handler.torchBiAdj, self.model.getEgoEmbeds(),
@@ -349,8 +445,7 @@ class Coach:
                 poss = poss.long().cuda()
                 negs = negs.long().cuda()
 
-                usrEmbeds, itmEmbeds, cList, subLst = self.model(self.handler, False, sub, cmp,  encoderAdj,
-                                                                           decoderAdj)
+                usrEmbeds, itmEmbeds, cList, subLst = self.model(self.handler, False, sub, cmp, encoderAdj, decoderAdj)
                 ancEmbeds = usrEmbeds[ancs]
                 posEmbeds = itmEmbeds[poss]
                 negEmbeds = itmEmbeds[negs]
@@ -360,55 +455,57 @@ class Coach:
                 ancEmbeds2 = usrEmbeds2[ancs]
                 posEmbeds2 = itmEmbeds2[poss]
 
-                bprLoss = (-t.sum(ancEmbeds * posEmbeds, dim=-1)).mean()
-                #
+                bprLoss = (-torch.sum(ancEmbeds * posEmbeds, dim=-1)).mean()
                 scoreDiff = pairPredict(ancEmbeds2, posEmbeds2, negEmbeds)
                 bprLoss2 = - (scoreDiff).sigmoid().log().sum() / args.batch
 
                 regLoss = calcRegLoss(self.model) * args.reg
 
                 contrastLoss = (contrast(ancs, usrEmbeds) + contrast(poss, itmEmbeds)) * args.ssl_reg + contrast(
-                ancs,
-                usrEmbeds,
-                itmEmbeds) + args.ctra*contrastNCE(ancs, subLst, cList)
-                loss = bprLoss + regLoss + contrastLoss + args.b2*bprLoss2
+                    ancs, usrEmbeds, itmEmbeds) + args.ctra * contrastNCE(ancs, subLst, cList)
+                loss = bprLoss + regLoss + contrastLoss + args.b2 * bprLoss2
 
                 epLoss += loss.item()
                 epPreLoss += bprLoss.item()
                 log('Validation Step %d/%d: loss = %.3f, regLoss = %.3f, clLoss = %.3f        ' % (
-                i, steps, loss, regLoss, contrastLoss), save=False, oneline=True)
-            ret = dict()
-            if steps > 0:
-                ret['Loss'] = epLoss / steps
-            else:
-                ret['Loss'] = 0  # ou une autre valeur par défaut
-            if steps > 0:
-                ret['preLoss'] = epPreLoss / steps
-            else:
-                ret['preLoss'] = 0  # ou une autre valeur par défaut
-
-            return ret
+                    i, steps, loss, regLoss, contrastLoss), save=False, oneline=True)
+                
+        ret = dict()
+        if steps > 0:
+            ret['Loss'] = epLoss / steps
+            ret['preLoss'] = epPreLoss / steps
+        else:
+            ret['Loss'] = 0
+            ret['preLoss'] = 0
+        return ret
             
     def testEpoch(self):
+        # FIXED: Ensure model is in evaluation mode
+        self.model.eval()
+        self.distill_model.eval()
+        
         tstLoader = self.handler.tstLoader
         epLoss, epRecall, epNdcg = [0] * 3
         i = 0
         num = tstLoader.dataset.__len__()
         steps = num // args.tstBat
-        for usr, trnMask in tstLoader:
-            i += 1
-            usr = usr.long().cuda()
-            trnMask = trnMask.cuda()
-            usrEmbeds, itmEmbeds, _, _ = self.model(self.handler, True, self.handler.torchBiAdj, self.handler.torchBiAdj,
-                                                          self.handler.torchBiAdj)
+        
+        with torch.no_grad():
+            for usr, trnMask in tstLoader:
+                i += 1
+                usr = usr.long().cuda()
+                trnMask = trnMask.cuda()
+                usrEmbeds, itmEmbeds, _, _ = self.model(self.handler, True, self.handler.torchBiAdj, self.handler.torchBiAdj,
+                                                            self.handler.torchBiAdj)
 
-            allPreds = t.mm(usrEmbeds[usr], t.transpose(itmEmbeds, 1, 0)) * (1 - trnMask) - trnMask * 1e8
-            _, topLocs = t.topk(allPreds, args.topk)
-            recall, ndcg = self.calcRes(topLocs.cpu().numpy(), self.handler.tstLoader.dataset.tstLocs, usr)
-            epRecall += recall
-            epNdcg += ndcg
-            log('Steps %d/%d: recall = %.2f, ndcg = %.2f          ' % (i, steps, recall, ndcg), save=False,
-                oneline=True)
+                allPreds = torch.mm(usrEmbeds[usr], torch.transpose(itmEmbeds, 1, 0)) * (1 - trnMask) - trnMask * 1e8
+                _, topLocs = torch.topk(allPreds, args.topk)
+                recall, ndcg = self.calcRes(topLocs.cpu().numpy(), self.handler.tstLoader.dataset.tstLocs, usr)
+                epRecall += recall
+                epNdcg += ndcg
+                log('Steps %d/%d: recall = %.2f, ndcg = %.2f          ' % (i, steps, recall, ndcg), save=False,
+                    oneline=True)
+        
         ret = dict()
         ret['Recall'] = epRecall / num
         ret['NDCG'] = epNdcg / num
@@ -442,13 +539,13 @@ class Coach:
         content = {
             'model': self.model,
         }
-        t.save(content, 'Models/' + args.save_path + '.mod')
+        torch.save(content, 'Models/' + args.save_path + '.mod')
         log('Model Saved: %s' % args.save_path)
 
     def loadModel(self):
-        ckp = t.load('Models/' + args.load_model + '.mod')
+        ckp = torch.load('Models/' + args.load_model + '.mod')
         self.model = ckp['model']
-        self.opt = t.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
 
         with open('History/' + args.load_model + '.his', 'rb') as fs:
             self.metrics = pickle.load(fs)
@@ -459,7 +556,7 @@ if __name__ == '__main__':
     logger.saveDefault = True
 
     log('Start')
-    if t.cuda.is_available():
+    if torch.cuda.is_available():
         print("using cuda")
     handler = DataHandler()
     handler.LoadData()
