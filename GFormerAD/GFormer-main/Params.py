@@ -49,7 +49,7 @@ def ParseArgs():
     parser.add_argument('--save_weights_freq', default=20, type=int, help='Frequency of saving model weights (epochs)')
     parser.add_argument('--auto_save', default=True, action='store_true', help='Enable automatic checkpoint saving')
     parser.add_argument('--save_best_only', default=False, action='store_true', help='Only save checkpoints when performance improves')
-
+    parser.add_argument('--load_weights', type=str, default=None, help='Path to weights file to load')
     return parser.parse_args()
 
 args = ParseArgs()

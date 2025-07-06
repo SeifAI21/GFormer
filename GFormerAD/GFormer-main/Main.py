@@ -186,19 +186,32 @@ class Coach:
         log(f'Model weights saved: {weights_path}')
 
     def load_model_weights(self, weights_path):
-        """Load only model weights"""
+        """Enhanced model weights loading for evaluation"""
         if not os.path.exists(weights_path):
             log(f'Weights file not found: {weights_path}')
             return False
         
         try:
-            # FIXED: Add weights_only=False for model weights loading
             weights = torch.load(weights_path, 
                             map_location='cuda' if torch.cuda.is_available() else 'cpu',
                             weights_only=False)
-            self.model.load_state_dict(weights['model_state_dict'])
-            log(f'Model weights loaded: {weights_path}')
+            
+            # Load main model weights
+            if 'model_state_dict' in weights:
+                self.model.load_state_dict(weights['model_state_dict'])
+                log('Main model weights loaded')
+            else:
+                # Legacy format - weights directly stored
+                self.model.load_state_dict(weights)
+                log('Main model weights loaded (legacy format)')
+            
+            # Copy to distillation model for consistency
+            self.distill_model.load_state_dict(self.model.state_dict())
+            log('Distillation model synchronized with main model')
+            
+            log(f'Model weights loaded successfully: {weights_path}')
             return True
+            
         except Exception as e:
             log(f'Error loading weights: {e}')
             return False
@@ -220,8 +233,21 @@ class Coach:
         
         # FIXED: Updated checkpoint loading logic to handle new parameters
         checkpoint_loaded = False
+
+        if hasattr(args, 'load_weights') and args.load_weights:
+            checkpoint_loaded = self.load_model_weights(args.load_weights)
+            if checkpoint_loaded:
+                log('Model weights loaded successfully')
+                # Set evaluation mode for weights-only loading
+                if args.epoch == 0:
+                    self.model.eval()
+                    self.distill_model.eval()
+                    log('Models set to evaluation mode')
+            else:
+                log('Failed to load model weights')
         
-        if hasattr(args, 'load_checkpoint') and args.load_checkpoint:
+        elif hasattr(args, 'load_checkpoint') and args.load_checkpoint:
+        
             # Load specific checkpoint file
             checkpoint_loaded = self.load_checkpoint(args.load_checkpoint)
             if checkpoint_loaded:
