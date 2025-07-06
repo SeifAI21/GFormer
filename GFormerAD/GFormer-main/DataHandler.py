@@ -107,8 +107,7 @@ class DataHandler:
         idxs = t.from_numpy(np.vstack([mat.row, mat.col]).astype(np.int64))
         vals = t.from_numpy(mat.data.astype(np.float32))
         shape = t.Size(mat.shape)
-        return t.sparse.FloatTensor(idxs, vals, shape).cuda()
-
+        return torch.sparse_coo_tensor(idxs, vals, shape, dtype=torch.float32).cuda()
     def makeAllOne(self, torchAdj):
         idxs = torchAdj._indices()
         vals = t.ones_like(torchAdj._values())

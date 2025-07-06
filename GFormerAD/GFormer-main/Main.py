@@ -129,7 +129,10 @@ class Coach:
             return False
         
         try:
-            checkpoint = torch.load(checkpoint_path, map_location='cuda' if torch.cuda.is_available() else 'cpu')
+            # FIXED: Use weights_only=False to allow numpy objects and other pickle data
+            checkpoint = torch.load(checkpoint_path, 
+                                map_location='cuda' if torch.cuda.is_available() else 'cpu',
+                                weights_only=False)
             
             # Load model states
             self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -189,7 +192,10 @@ class Coach:
             return False
         
         try:
-            weights = torch.load(weights_path, map_location='cuda' if torch.cuda.is_available() else 'cpu')
+            # FIXED: Add weights_only=False for model weights loading
+            weights = torch.load(weights_path, 
+                            map_location='cuda' if torch.cuda.is_available() else 'cpu',
+                            weights_only=False)
             self.model.load_state_dict(weights['model_state_dict'])
             log(f'Model weights loaded: {weights_path}')
             return True
@@ -553,7 +559,8 @@ class Coach:
         log('Model Saved: %s' % args.save_path)
 
     def loadModel(self):
-        ckp = torch.load('Models/' + args.load_model + '.mod')
+        # FIXED: Add weights_only=False for legacy model loading
+        ckp = torch.load('Models/' + args.load_model + '.mod', weights_only=False)
         self.model = ckp['model']
         self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
 
