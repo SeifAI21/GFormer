@@ -12,111 +12,6 @@ import random
 init = nn.init.xavier_uniform_
 uniformInit = nn.init.uniform
 
-class GraphSAGELayer(nn.Module):
-    def __init__(self, in_dim=None, out_dim=None, aggregator_type='mean', dropout=0.1):
-        super(GraphSAGELayer, self).__init__()
-        
-        self.in_dim = in_dim or args.latdim
-        self.out_dim = out_dim or args.latdim
-        self.aggregator_type = aggregator_type
-        self.dropout = nn.Dropout(dropout)
-        
-        # Linear transformations
-        self.self_linear = nn.Linear(self.in_dim, self.out_dim)
-        self.neigh_linear = nn.Linear(self.in_dim, self.out_dim)
-        
-        # Aggregator-specific components
-        if aggregator_type == 'lstm':
-            self.lstm = nn.LSTM(self.in_dim, self.out_dim, batch_first=True)
-        elif aggregator_type == 'pool':
-            self.pool_linear = nn.Linear(self.in_dim, self.out_dim)
-        
-        self.activation = nn.ReLU()
-        # FIXED: Add eps to LayerNorm to prevent NaN
-        self.norm = nn.LayerNorm(self.out_dim, eps=1e-8)
-        
-        # Initialize weights
-        nn.init.xavier_uniform_(self.self_linear.weight)
-        nn.init.xavier_uniform_(self.neigh_linear.weight)
-        
-        # FIXED: Initialize bias to small values
-        nn.init.constant_(self.self_linear.bias, 0.01)
-        nn.init.constant_(self.neigh_linear.bias, 0.01)
-
-    def aggregate_neighbors(self, adj, embeds):
-        """Aggregate neighbor embeddings using specified aggregator"""
-        if self.aggregator_type == 'mean':
-            # Mean aggregation (most efficient for sparse matrices)
-            neighbor_agg = torch.spmm(adj, embeds)
-            return neighbor_agg
-        
-        # For other aggregators, we need to handle sparse matrix differently
-        indices = adj._indices()
-        values = adj._values()
-        rows, cols = indices[0, :], indices[1, :]
-        
-        neighbor_agg = torch.zeros_like(embeds)
-        
-        if self.aggregator_type == 'max':
-            # Max pooling aggregation
-            for i in range(adj.shape[0]):
-                mask = (rows == i)
-                if mask.sum() > 0:
-                    neighbor_embeds = embeds[cols[mask]]
-                    neighbor_agg[i] = torch.max(neighbor_embeds, dim=0)[0]
-                else:
-                    neighbor_agg[i] = embeds[i]  # Self if no neighbors
-                    
-        elif self.aggregator_type == 'pool':
-            # Pooling aggregation
-            for i in range(adj.shape[0]):
-                mask = (rows == i)
-                if mask.sum() > 0:
-                    neighbor_embeds = embeds[cols[mask]]
-                    pooled = torch.mean(self.activation(self.pool_linear(neighbor_embeds)), dim=0)
-                    neighbor_agg[i] = pooled
-                else:
-                    neighbor_agg[i] = embeds[i]
-        
-        return neighbor_agg
-
-    def forward(self, adj, embeds):
-        # FIXED: Check for NaN in input
-        if torch.isnan(embeds).any():
-            print("Warning: NaN detected in GraphSAGE input embeddings")
-            embeds = torch.nan_to_num(embeds, nan=0.01)
-        
-        # Apply dropout to input embeddings
-        embeds = self.dropout(embeds)
-        
-        # Aggregate neighbors
-        neighbor_agg = self.aggregate_neighbors(adj, embeds)
-        
-        # FIXED: Check for NaN in aggregation
-        if torch.isnan(neighbor_agg).any():
-            print("Warning: NaN detected in neighbor aggregation")
-            neighbor_agg = torch.nan_to_num(neighbor_agg, nan=0.01)
-        
-        # Transform self and neighbor embeddings
-        self_transformed = self.self_linear(embeds)
-        neigh_transformed = self.neigh_linear(neighbor_agg)
-        
-        # Combine self and neighbor information
-        combined = self_transformed + neigh_transformed
-        
-        # FIXED: Clamp values to prevent explosion
-        combined = torch.clamp(combined, min=-10.0, max=10.0)
-        
-        # Apply activation and normalization
-        output = self.norm(self.activation(combined))
-        
-        # FIXED: Final NaN check
-        if torch.isnan(output).any():
-            print("Warning: NaN detected in GraphSAGE output")
-            output = torch.nan_to_num(output, nan=0.01)
-        
-        return output
-
 class Model(nn.Module):
     def __init__(self, gtLayer):
         super(Model, self).__init__()
@@ -124,16 +19,7 @@ class Model(nn.Module):
         self.uEmbeds = nn.Parameter(init(t.empty(args.user, args.latdim)))
         self.iEmbeds = nn.Parameter(init(t.empty(args.item, args.latdim)))
         
-        # Use GraphSAGE layers with more conservative settings
-        self.sage_layers = nn.ModuleList([
-            GraphSAGELayer(
-                aggregator_type=getattr(args, 'sage_aggregator', 'mean'),
-                dropout=getattr(args, 'sage_dropout', 0.1)
-            ) 
-            for _ in range(args.gcn_layer)
-        ])
-        
-        # Keep original GCN layer for fallback
+        # Use original GCN layers (this was working)
         self.gcnLayer = GCNLayer()
         
         self.gtLayers = ResidualGTLayer()
@@ -152,42 +38,22 @@ class Model(nn.Module):
         emb, _ = self.gtLayers(sub, embeds)
         subList = [embeds, args.gtw*emb]
 
-        # Use GraphSAGE layers with NaN checking
-        for i, sage_layer in enumerate(self.sage_layers):
-            try:
-                embeds = sage_layer(encoderAdj, embedsLst[-1])
-                embeds2 = sage_layer(sub, embedsLst[-1])
-                embeds3 = sage_layer(cmp, embedsLst[-1])
-                
-                # FIXED: Check for NaN after each layer
-                if torch.isnan(embeds).any() or torch.isnan(embeds2).any() or torch.isnan(embeds3).any():
-                    print(f"Warning: NaN detected in GraphSAGE layer {i}, falling back to GCN")
-                    # Fallback to GCN if GraphSAGE produces NaN
-                    embeds = self.gcnLayer(encoderAdj, embedsLst[-1])
-                    embeds2 = self.gcnLayer(sub, embedsLst[-1])
-                    embeds3 = self.gcnLayer(cmp, embedsLst[-1])
-                
-                subList.append(embeds2)
-                embedsLst.append(embeds)
-                cList.append(embeds3)
-                
-            except Exception as e:
-                print(f"Error in GraphSAGE layer {i}: {e}, falling back to GCN")
-                # Fallback to GCN on any error
-                embeds = self.gcnLayer(encoderAdj, embedsLst[-1])
-                embeds2 = self.gcnLayer(sub, embedsLst[-1])
-                embeds3 = self.gcnLayer(cmp, embedsLst[-1])
-                subList.append(embeds2)
-                embedsLst.append(embeds)
-                cList.append(embeds3)
+        # Use original GCN layers (revert to working version)
+        for i in range(args.gcn_layer):
+            embeds = self.gcnLayer(encoderAdj, embedsLst[-1])
+            embeds2 = self.gcnLayer(sub, embedsLst[-1])
+            embeds3 = self.gcnLayer(cmp, embedsLst[-1])
+            subList.append(embeds2)
+            embedsLst.append(embeds)
+            cList.append(embeds3)
             
-        # PNN layers (unchanged)
+        # PNN layers
         if is_test is False:
             for i, pnn in enumerate(self.pnnLayers):
                 embeds = pnn(handler, embedsLst[-1])
                 embedsLst.append(embeds)
                 
-        # Decoder GT layer (unchanged)
+        # Decoder GT layer
         if decoderAdj is not None:
             embeds, _ = self.gtLayers(decoderAdj, embedsLst[-1])
             embedsLst.append(embeds)
@@ -206,6 +72,7 @@ class GCNLayer(nn.Module):
     def forward(self, adj, embeds):
         return t.spmm(adj, embeds)
 
+# Remove the GraphSAGELayer class entirely and keep the rest of your classes as they were
 class PNNLayer(nn.Module):
     def __init__(self):
         super(PNNLayer, self).__init__()
@@ -232,6 +99,7 @@ class PNNLayer(nn.Module):
 
         return outposition1
 
+# Keep the rest of your classes unchanged...
 class ResidualGTLayer(nn.Module):
     def __init__(self):
         super(ResidualGTLayer, self).__init__()
@@ -362,7 +230,6 @@ class LocalGraph(nn.Module):
         newRows = t.cat([add_rows, add_cols, t.arange(args.user + args.item).cuda(), rows])
         newCols = t.cat([add_cols, add_rows, t.arange(args.user + args.item).cuda(), cols])
 
-        # FIXED: Use proper tensor creation
         ratings_keep = torch.ones(len(newRows), dtype=torch.float32)
         adj_mat = sp.csr_matrix((ratings_keep.cpu().numpy(), (newRows.cpu().numpy(), newCols.cpu().numpy())),
                                 shape=(self.num_users + self.num_items, self.num_users + self.num_items))
@@ -406,10 +273,8 @@ class RandomMaskSubgraphs(nn.Module):
             att_f[att_f > 3] = 3
             att_edge = 1.0 / (np.exp(np.array(att_f.detach().cpu() + 1E-8)))
         
-        # FIXED: Handle NaN in attention weights
         att_f = att_edge / (att_edge.sum() + 1e-8)
         
-        # FIXED: Check for NaN and replace with uniform distribution
         if np.isnan(att_f).any() or np.isinf(att_f).any():
             print("Warning: NaN/Inf detected in attention weights, using uniform distribution")
             att_f = np.ones(len(att_f)) / len(att_f)
@@ -439,7 +304,6 @@ class RandomMaskSubgraphs(nn.Module):
         rows = t.cat([t.arange(args.user + args.item).cuda(), rows])
         cols = t.cat([t.arange(args.user + args.item).cuda(), cols])
 
-        # FIXED: Use proper tensor creation
         ratings_keep = torch.ones(len(rows), dtype=torch.float32)
         adj_mat = sp.csr_matrix((ratings_keep.cpu().numpy(), (rows.cpu().numpy(), cols.cpu().numpy())),
                                 shape=(self.num_users + self.num_items, self.num_users + self.num_items))
@@ -462,7 +326,6 @@ class RandomMaskSubgraphs(nn.Module):
         att_f = 1.0 / (np.exp(np.array(att_f.detach().cpu() + 1E-8)))
         att_f1 = att_f / (att_f.sum() + 1e-8)
 
-        # FIXED: Check for NaN and replace with uniform distribution
         if np.isnan(att_f1).any() or np.isinf(att_f1).any():
             print("Warning: NaN/Inf detected in attention weights, using uniform distribution")
             att_f1 = np.ones(len(att_f1)) / len(att_f1)
@@ -489,7 +352,6 @@ class RandomMaskSubgraphs(nn.Module):
                 drop_edges.append(True)
             i += 1
 
-        # FIXED: Use proper tensor creation
         ratings_keep = torch.ones(len(rows), dtype=torch.float32)
         adj_mat = sp.csr_matrix((ratings_keep.cpu().numpy(), (rows.cpu().numpy(), cols.cpu().numpy())),
                                 shape=(self.num_users + self.num_items, self.num_users + self.num_items))
