@@ -12,6 +12,48 @@ import random
 init = nn.init.xavier_uniform_
 uniformInit = nn.init.uniform
 
+# Add this class after your existing imports
+class GraphSAGELayer(nn.Module):
+    def __init__(self, aggregator_type='mean'):
+        super(GraphSAGELayer, self).__init__()
+        self.aggregator_type = aggregator_type
+        
+        # Simple linear combination (very conservative)
+        self.self_weight = nn.Parameter(torch.tensor(0.5))  # Weight for self
+        self.neigh_weight = nn.Parameter(torch.tensor(0.5))  # Weight for neighbors
+        
+        # Optional: small linear transformation
+        self.linear = nn.Linear(args.latdim, args.latdim, bias=False)
+        
+        # Initialize to identity transformation
+        nn.init.eye_(self.linear.weight)
+        
+    def forward(self, adj, embeds):
+        # Standard neighbor aggregation (same as GCN)
+        neighbor_agg = torch.spmm(adj, embeds)
+        
+        if self.aggregator_type == 'mean':
+            # GraphSAGE: combine self + neighbors with learnable weights
+            output = self.self_weight * embeds + self.neigh_weight * neighbor_agg
+            
+        elif self.aggregator_type == 'concat':
+            # Concatenate self and neighbor embeddings, then project
+            combined = torch.cat([embeds, neighbor_agg], dim=1)
+            # Need a linear layer that maps 2*latdim -> latdim
+            if not hasattr(self, 'concat_linear'):
+                self.concat_linear = nn.Linear(2 * args.latdim, args.latdim, bias=False).cuda()
+                nn.init.xavier_uniform_(self.concat_linear.weight)
+            output = self.concat_linear(combined)
+            
+        else:  # fallback to GCN
+            output = neighbor_agg
+            
+        # Optional linear transformation
+        output = self.linear(output)
+        
+        return output
+
+# Update your Model class
 class Model(nn.Module):
     def __init__(self, gtLayer):
         super(Model, self).__init__()
@@ -19,8 +61,16 @@ class Model(nn.Module):
         self.uEmbeds = nn.Parameter(init(t.empty(args.user, args.latdim)))
         self.iEmbeds = nn.Parameter(init(t.empty(args.item, args.latdim)))
         
-        # Use original GCN layers (this was working)
-        self.gcnLayer = GCNLayer()
+        # CHOICE: Use GraphSAGE or GCN based on parameter
+        if getattr(args, 'use_sage', False):
+            print(f"Using GraphSAGE with aggregator: {getattr(args, 'sage_aggregator', 'mean')}")
+            self.gcnLayers = nn.ModuleList([
+                GraphSAGELayer(aggregator_type=getattr(args, 'sage_aggregator', 'mean')) 
+                for _ in range(args.gcn_layer)
+            ])
+        else:
+            print("Using standard GCN layers")
+            self.gcnLayers = nn.ModuleList([GCNLayer() for _ in range(args.gcn_layer)])
         
         self.gtLayers = ResidualGTLayer()
         self.pnnLayers = nn.Sequential(*[PNNLayer() for i in range(args.pnn_layer)])
@@ -38,22 +88,21 @@ class Model(nn.Module):
         emb, _ = self.gtLayers(sub, embeds)
         subList = [embeds, args.gtw*emb]
 
-        # Use original GCN layers (revert to working version)
-        for i in range(args.gcn_layer):
-            embeds = self.gcnLayer(encoderAdj, embedsLst[-1])
-            embeds2 = self.gcnLayer(sub, embedsLst[-1])
-            embeds3 = self.gcnLayer(cmp, embedsLst[-1])
+        # Use either GraphSAGE or GCN layers
+        for i, layer in enumerate(self.gcnLayers):
+            embeds = layer(encoderAdj, embedsLst[-1])
+            embeds2 = layer(sub, embedsLst[-1])
+            embeds3 = layer(cmp, embedsLst[-1])
             subList.append(embeds2)
             embedsLst.append(embeds)
             cList.append(embeds3)
             
-        # PNN layers
+        # Rest unchanged...
         if is_test is False:
             for i, pnn in enumerate(self.pnnLayers):
                 embeds = pnn(handler, embedsLst[-1])
                 embedsLst.append(embeds)
                 
-        # Decoder GT layer
         if decoderAdj is not None:
             embeds, _ = self.gtLayers(decoderAdj, embedsLst[-1])
             embedsLst.append(embeds)
@@ -63,6 +112,60 @@ class Model(nn.Module):
         subList = sum(subList)
 
         return embeds[:args.user], embeds[args.user:], cList, subList
+
+
+
+# class Model(nn.Module):
+#     def __init__(self, gtLayer):
+#         super(Model, self).__init__()
+
+#         self.uEmbeds = nn.Parameter(init(t.empty(args.user, args.latdim)))
+#         self.iEmbeds = nn.Parameter(init(t.empty(args.item, args.latdim)))
+        
+#         # Use original GCN layers (this was working)
+#         self.gcnLayer = GCNLayer()
+        
+#         self.gtLayers = ResidualGTLayer()
+#         self.pnnLayers = nn.Sequential(*[PNNLayer() for i in range(args.pnn_layer)])
+
+#     def getEgoEmbeds(self):
+#         return t.cat([self.uEmbeds, self.iEmbeds], axis=0)
+
+#     def forward(self, handler, is_test, sub, cmp, encoderAdj, decoderAdj=None):
+#         embeds = t.cat([self.uEmbeds, self.iEmbeds], axis=0)
+#         embedsLst = [embeds]
+        
+#         # GT layers for sub and cmp
+#         emb, _ = self.gtLayers(cmp, embeds)
+#         cList = [embeds, args.gtw*emb]
+#         emb, _ = self.gtLayers(sub, embeds)
+#         subList = [embeds, args.gtw*emb]
+
+#         # Use original GCN layers (revert to working version)
+#         for i in range(args.gcn_layer):
+#             embeds = self.gcnLayer(encoderAdj, embedsLst[-1])
+#             embeds2 = self.gcnLayer(sub, embedsLst[-1])
+#             embeds3 = self.gcnLayer(cmp, embedsLst[-1])
+#             subList.append(embeds2)
+#             embedsLst.append(embeds)
+#             cList.append(embeds3)
+            
+#         # PNN layers
+#         if is_test is False:
+#             for i, pnn in enumerate(self.pnnLayers):
+#                 embeds = pnn(handler, embedsLst[-1])
+#                 embedsLst.append(embeds)
+                
+#         # Decoder GT layer
+#         if decoderAdj is not None:
+#             embeds, _ = self.gtLayers(decoderAdj, embedsLst[-1])
+#             embedsLst.append(embeds)
+            
+#         embeds = sum(embedsLst)
+#         cList = sum(cList)
+#         subList = sum(subList)
+
+#         return embeds[:args.user], embeds[args.user:], cList, subList
 
 
 class GCNLayer(nn.Module):
