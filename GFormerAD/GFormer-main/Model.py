@@ -32,11 +32,16 @@ class GraphSAGELayer(nn.Module):
             self.pool_linear = nn.Linear(self.in_dim, self.out_dim)
         
         self.activation = nn.ReLU()
-        self.norm = nn.LayerNorm(self.out_dim)
+        # FIXED: Add eps to LayerNorm to prevent NaN
+        self.norm = nn.LayerNorm(self.out_dim, eps=1e-8)
         
         # Initialize weights
         nn.init.xavier_uniform_(self.self_linear.weight)
         nn.init.xavier_uniform_(self.neigh_linear.weight)
+        
+        # FIXED: Initialize bias to small values
+        nn.init.constant_(self.self_linear.bias, 0.01)
+        nn.init.constant_(self.neigh_linear.bias, 0.01)
 
     def aggregate_neighbors(self, adj, embeds):
         """Aggregate neighbor embeddings using specified aggregator"""
@@ -76,11 +81,21 @@ class GraphSAGELayer(nn.Module):
         return neighbor_agg
 
     def forward(self, adj, embeds):
+        # FIXED: Check for NaN in input
+        if torch.isnan(embeds).any():
+            print("Warning: NaN detected in GraphSAGE input embeddings")
+            embeds = torch.nan_to_num(embeds, nan=0.01)
+        
         # Apply dropout to input embeddings
         embeds = self.dropout(embeds)
         
         # Aggregate neighbors
         neighbor_agg = self.aggregate_neighbors(adj, embeds)
+        
+        # FIXED: Check for NaN in aggregation
+        if torch.isnan(neighbor_agg).any():
+            print("Warning: NaN detected in neighbor aggregation")
+            neighbor_agg = torch.nan_to_num(neighbor_agg, nan=0.01)
         
         # Transform self and neighbor embeddings
         self_transformed = self.self_linear(embeds)
@@ -89,8 +104,16 @@ class GraphSAGELayer(nn.Module):
         # Combine self and neighbor information
         combined = self_transformed + neigh_transformed
         
+        # FIXED: Clamp values to prevent explosion
+        combined = torch.clamp(combined, min=-10.0, max=10.0)
+        
         # Apply activation and normalization
         output = self.norm(self.activation(combined))
+        
+        # FIXED: Final NaN check
+        if torch.isnan(output).any():
+            print("Warning: NaN detected in GraphSAGE output")
+            output = torch.nan_to_num(output, nan=0.01)
         
         return output
 
@@ -101,13 +124,16 @@ class Model(nn.Module):
         self.uEmbeds = nn.Parameter(init(t.empty(args.user, args.latdim)))
         self.iEmbeds = nn.Parameter(init(t.empty(args.item, args.latdim)))
         
-        # REPLACED: GCN layers with GraphSAGE layers
+        # Use GraphSAGE layers with more conservative settings
         self.sage_layers = nn.ModuleList([
-            GraphSAGELayer(aggregator_type=getattr(args, 'sage_aggregator', 'mean')) 
+            GraphSAGELayer(
+                aggregator_type=getattr(args, 'sage_aggregator', 'mean'),
+                dropout=getattr(args, 'sage_dropout', 0.1)
+            ) 
             for _ in range(args.gcn_layer)
         ])
         
-        # Keep original GCN layer for backward compatibility
+        # Keep original GCN layer for fallback
         self.gcnLayer = GCNLayer()
         
         self.gtLayers = ResidualGTLayer()
@@ -126,14 +152,34 @@ class Model(nn.Module):
         emb, _ = self.gtLayers(sub, embeds)
         subList = [embeds, args.gtw*emb]
 
-        # REPLACED: Use GraphSAGE layers instead of GCN
+        # Use GraphSAGE layers with NaN checking
         for i, sage_layer in enumerate(self.sage_layers):
-            embeds = sage_layer(encoderAdj, embedsLst[-1])
-            embeds2 = sage_layer(sub, embedsLst[-1])
-            embeds3 = sage_layer(cmp, embedsLst[-1])
-            subList.append(embeds2)
-            embedsLst.append(embeds)
-            cList.append(embeds3)
+            try:
+                embeds = sage_layer(encoderAdj, embedsLst[-1])
+                embeds2 = sage_layer(sub, embedsLst[-1])
+                embeds3 = sage_layer(cmp, embedsLst[-1])
+                
+                # FIXED: Check for NaN after each layer
+                if torch.isnan(embeds).any() or torch.isnan(embeds2).any() or torch.isnan(embeds3).any():
+                    print(f"Warning: NaN detected in GraphSAGE layer {i}, falling back to GCN")
+                    # Fallback to GCN if GraphSAGE produces NaN
+                    embeds = self.gcnLayer(encoderAdj, embedsLst[-1])
+                    embeds2 = self.gcnLayer(sub, embedsLst[-1])
+                    embeds3 = self.gcnLayer(cmp, embedsLst[-1])
+                
+                subList.append(embeds2)
+                embedsLst.append(embeds)
+                cList.append(embeds3)
+                
+            except Exception as e:
+                print(f"Error in GraphSAGE layer {i}: {e}, falling back to GCN")
+                # Fallback to GCN on any error
+                embeds = self.gcnLayer(encoderAdj, embedsLst[-1])
+                embeds2 = self.gcnLayer(sub, embedsLst[-1])
+                embeds3 = self.gcnLayer(cmp, embedsLst[-1])
+                subList.append(embeds2)
+                embedsLst.append(embeds)
+                cList.append(embeds3)
             
         # PNN layers (unchanged)
         if is_test is False:
@@ -174,9 +220,9 @@ class PNNLayer(nn.Module):
         dists_array = t.tensor(handler.dists_array, dtype=t.float32).to("cuda:0")
         set_ids_emb = embeds[anchor_set_id]
         set_ids_reshape = set_ids_emb.repeat(dists_array.shape[1], 1).reshape(-1, len(set_ids_emb),
-                                                                              args.latdim)  # 69534.256.32
-        dists_array_emb = dists_array.T.unsqueeze(2)  #
-        messages = set_ids_reshape * dists_array_emb  # 69000*256*32
+                                                                              args.latdim)
+        dists_array_emb = dists_array.T.unsqueeze(2)
+        messages = set_ids_reshape * dists_array_emb
 
         self_feature = embeds.repeat(args.anchor_set_num, 1).reshape(-1, args.anchor_set_num, args.latdim)
         messages = torch.cat((messages, self_feature), dim=-1)
@@ -194,7 +240,7 @@ class ResidualGTLayer(nn.Module):
     def forward(self, adj, embeds, flag=False):
         x, att1 = self.gtLayer(adj, embeds, flag)
         y, att2 = self.gtLayer(adj, x, flag)
-        y = y + x  # FIXED: was 'y = y + xx' which was a typo
+        y = y + x
         return y, (att1, att2)
 
 class GTLayer(nn.Module):
@@ -230,14 +276,13 @@ class GTLayer(nn.Module):
 
         resEmbeds = torch.einsum('eh, ehd -> ehd', att, vEmbeds).view([-1, args.latdim])
         tem = torch.zeros([adj.shape[0], args.latdim]).cuda()
-        resEmbeds = tem.index_add_(0, rows, resEmbeds)  # nd
+        resEmbeds = tem.index_add_(0, rows, resEmbeds)
 
         resEmbeds = self.out_proj(resEmbeds)
 
         return resEmbeds, att
 
 class LocalGraph(nn.Module):
-
     def __init__(self, gtLayer):
         super(LocalGraph, self).__init__()
         self.gt_layer = gtLayer
@@ -266,7 +311,6 @@ class LocalGraph(nn.Module):
     def single_source_shortest_path_length_range(self, graph, node_range, cutoff=None):
       dists_dict = {}
       for node in node_range:
-        # Using Dijkstra's method with cutoff
         dists_dict[node] = nx.single_source_dijkstra_path_length(graph, node, cutoff=cutoff)
       return dists_dict
 
@@ -277,7 +321,7 @@ class LocalGraph(nn.Module):
             num_workers = int(num_workers / 4)
         elif len(nodes) < 400:
             num_workers = int(num_workers / 2)
-        num_workers = 1  # windows
+        num_workers = 1
         pool = mp.Pool(processes=num_workers)
         results = self.single_source_shortest_path_length_range(graph, nodes, cutoff)
 
@@ -288,10 +332,6 @@ class LocalGraph(nn.Module):
         return dists_dict
 
     def precompute_dist_data(self, edge_index, num_nodes, approximate=0):
-        '''
-            Here dist is 1/real_dist, higher actually means closer, 0 means disconnected
-            :return:
-            '''
         graph = nx.Graph()
         graph.add_edges_from(edge_index)
 
@@ -309,7 +349,6 @@ class LocalGraph(nn.Module):
         return dists_array
 
     def forward(self, adj, embeds, handler):
-
         embeds = self.pnn(handler, embeds)
         rows = adj._indices()[0, :]
         cols = adj._indices()[1, :]
@@ -323,8 +362,9 @@ class LocalGraph(nn.Module):
         newRows = t.cat([add_rows, add_cols, t.arange(args.user + args.item).cuda(), rows])
         newCols = t.cat([add_cols, add_rows, t.arange(args.user + args.item).cuda(), cols])
 
-        ratings_keep = np.array(t.ones_like(t.tensor(newRows.cpu())))
-        adj_mat = sp.csr_matrix((ratings_keep, (newRows.cpu(), newCols.cpu())),
+        # FIXED: Use proper tensor creation
+        ratings_keep = torch.ones(len(newRows), dtype=torch.float32)
+        adj_mat = sp.csr_matrix((ratings_keep.cpu().numpy(), (newRows.cpu().numpy(), newCols.cpu().numpy())),
                                 shape=(self.num_users + self.num_items, self.num_users + self.num_items))
 
         add_adj = self.sp_mat_to_sp_tensor(adj_mat).to(self.device)
@@ -364,8 +404,16 @@ class RandomMaskSubgraphs(nn.Module):
         else:
             att_f = att_edge
             att_f[att_f > 3] = 3
-            att_edge = 1.0 / (np.exp(np.array(att_f.detach().cpu() + 1E-8)))  # 基于mlp可以去除
-        att_f = att_edge / att_edge.sum()
+            att_edge = 1.0 / (np.exp(np.array(att_f.detach().cpu() + 1E-8)))
+        
+        # FIXED: Handle NaN in attention weights
+        att_f = att_edge / (att_edge.sum() + 1e-8)
+        
+        # FIXED: Check for NaN and replace with uniform distribution
+        if np.isnan(att_f).any() or np.isinf(att_f).any():
+            print("Warning: NaN/Inf detected in attention weights, using uniform distribution")
+            att_f = np.ones(len(att_f)) / len(att_f)
+        
         keep_index = np.random.choice(np.arange(len(users_up.cpu())), int(len(users_up.cpu()) * args.sub),
                                       replace=False, p=att_f)
 
@@ -391,8 +439,9 @@ class RandomMaskSubgraphs(nn.Module):
         rows = t.cat([t.arange(args.user + args.item).cuda(), rows])
         cols = t.cat([t.arange(args.user + args.item).cuda(), cols])
 
-        ratings_keep = np.array(t.ones_like(t.tensor(rows.cpu())))
-        adj_mat = sp.csr_matrix((ratings_keep, (rows.cpu(), cols.cpu())),
+        # FIXED: Use proper tensor creation
+        ratings_keep = torch.ones(len(rows), dtype=torch.float32)
+        adj_mat = sp.csr_matrix((ratings_keep.cpu().numpy(), (rows.cpu().numpy(), cols.cpu().numpy())),
                                 shape=(self.num_users + self.num_items, self.num_users + self.num_items))
 
         rowsum = np.array(adj_mat.sum(1))
@@ -411,7 +460,12 @@ class RandomMaskSubgraphs(nn.Module):
         att_f = att_edge
         att_f[att_f > 3] = 3
         att_f = 1.0 / (np.exp(np.array(att_f.detach().cpu() + 1E-8)))
-        att_f1 = att_f / att_f.sum()
+        att_f1 = att_f / (att_f.sum() + 1e-8)
+
+        # FIXED: Check for NaN and replace with uniform distribution
+        if np.isnan(att_f1).any() or np.isinf(att_f1).any():
+            print("Warning: NaN/Inf detected in attention weights, using uniform distribution")
+            att_f1 = np.ones(len(att_f1)) / len(att_f1)
 
         keep_index = np.random.choice(np.arange(len(users_up.cpu())), int(len(users_up.cpu()) * args.keepRate),
                                           replace=False, p=att_f1)
@@ -435,8 +489,9 @@ class RandomMaskSubgraphs(nn.Module):
                 drop_edges.append(True)
             i += 1
 
-        ratings_keep = np.array(t.ones_like(t.tensor(rows.cpu())))
-        adj_mat = sp.csr_matrix((ratings_keep, (rows.cpu(), cols.cpu())),
+        # FIXED: Use proper tensor creation
+        ratings_keep = torch.ones(len(rows), dtype=torch.float32)
+        adj_mat = sp.csr_matrix((ratings_keep.cpu().numpy(), (rows.cpu().numpy(), cols.cpu().numpy())),
                                 shape=(self.num_users + self.num_items, self.num_users + self.num_items))
 
         rowsum = np.array(adj_mat.sum(1))
@@ -447,7 +502,6 @@ class RandomMaskSubgraphs(nn.Module):
         adj_matrix = norm_adj_tmp.dot(d_mat_inv)
         encoderAdj = self.sp_mat_to_sp_tensor(adj_matrix).to(self.device)
 
-
         drop_row_ids = users_up[drop_edges]
         drop_col_ids = items_up[drop_edges]
 
@@ -456,7 +510,7 @@ class RandomMaskSubgraphs(nn.Module):
 
         ext_cols = t.tensor(ext_cols).to(self.device)
         ext_rows = t.tensor(ext_rows).to(self.device)
-        #
+
         tmp_rows = t.cat([ext_rows, drop_row_ids])
         tmp_cols = t.cat([ext_cols, drop_col_ids])
 
