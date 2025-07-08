@@ -50,6 +50,9 @@ def ParseArgs():
     parser.add_argument('--auto_save', default=True, action='store_true', help='Enable automatic checkpoint saving')
     parser.add_argument('--save_best_only', default=False, action='store_true', help='Only save checkpoints when performance improves')
     parser.add_argument('--load_weights', type=str, default=None, help='Path to weights file to load')
+    parser.add_argument('--sage_aggregator', default='mean', type=str, choices=['mean', 'max', 'lstm', 'pool'], help='GraphSAGE aggregator type')
+    parser.add_argument('--sage_dropout', default=0.1, type=float, help='Dropout rate for GraphSAGE layers')
+    parser.add_argument('--use_sage', default=True, action='store_true', help='Use GraphSAGE instead of GCN')
     return parser.parse_args()
 
 args = ParseArgs()
