@@ -56,6 +56,10 @@ def ParseArgs():
     parser.add_argument('--simple_ultra', default=False, action='store_true', help='Use simplified UltraGCN variant')
     parser.add_argument('--ultra_beta', default=0.5, type=float, help='UltraGCN beta parameter for balancing self vs neighbors')
     parser.add_argument('--ultra_gamma', default=1e-4, type=float, help='UltraGCN gamma parameter for regularization')
+    parser.add_argument('--use_graphwave', default=False, type=bool, help='Use GraphWave instead of GCN')
+    parser.add_argument('--simple_wave', default=False, type=bool, help='Use simplified GraphWave')
+    parser.add_argument('--wave_scales', default=10, type=int, help='Number of wavelet scales')
+    parser.add_argument('--wave_approximate', default=True, type=bool, help='Use approximation for efficiency')
     return parser.parse_args()
 
 args = ParseArgs()

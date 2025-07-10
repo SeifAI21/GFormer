@@ -8,142 +8,172 @@ import numpy as np
 import networkx as nx
 import multiprocessing as mp
 import random
-
-import torch
-import torch as t
-from torch import nn
-import torch.nn.functional as F
-from Params import args
-import scipy.sparse as sp
-import numpy as np
-import networkx as nx
-import multiprocessing as mp
-import random
+from torch_geometric.utils import get_laplacian
 
 init = nn.init.xavier_uniform_
 uniformInit = nn.init.uniform
 
-# Fixed UltraGCN Layer Implementation
-class UltraGCNLayer(nn.Module):
-    def __init__(self):
-        super(UltraGCNLayer, self).__init__()
-        # UltraGCN uses direct optimization without message passing
-        self.beta = nn.Parameter(torch.tensor(args.ultra_beta))
-        self.gamma = nn.Parameter(torch.tensor(args.ultra_gamma))
-        
-    def compute_degrees_from_sparse(self, adj):
-        """Compute user and item degrees from sparse adjacency matrix"""
-        # Get edges
-        rows, cols = adj._indices()[0, :], adj._indices()[1, :]
-        
-        # Count degrees by user/item type
-        user_mask = rows < args.user
-        item_mask = rows >= args.user
-        
-        # User interactions (users -> items)
-        user_interactions = user_mask & (cols >= args.user)
-        if user_interactions.sum() > 0:
-            user_rows = rows[user_interactions]
-            user_degrees = torch.zeros(args.user, device=adj.device)
-            user_degrees.scatter_add_(0, user_rows, torch.ones_like(user_rows, dtype=torch.float))
-        else:
-            user_degrees = torch.ones(args.user, device=adj.device)
-        
-        # Item interactions (items -> users) 
-        item_interactions = item_mask & (cols < args.user)
-        if item_interactions.sum() > 0:
-            item_rows = rows[item_interactions] - args.user
-            item_degrees = torch.zeros(args.item, device=adj.device)
-            item_degrees.scatter_add_(0, item_rows, torch.ones_like(item_rows, dtype=torch.float))
-        else:
-            item_degrees = torch.ones(args.item, device=adj.device)
-        
-        # Avoid division by zero
-        user_degrees = torch.clamp(user_degrees, min=1e-8)
-        item_degrees = torch.clamp(item_degrees, min=1e-8)
-        
-        return user_degrees, item_degrees
-        
-    def forward(self, adj, embeds):
-        """
-        Fixed UltraGCN forward pass using proper sparse operations
-        """
-        user_embeds = embeds[:args.user]
-        item_embeds = embeds[args.user:]
-        
-        # Compute degrees
-        user_degrees, item_degrees = self.compute_degrees_from_sparse(adj)
-        
-        # Get interaction edges
-        rows, cols = adj._indices()[0, :], adj._indices()[1, :]
-        
-        # User -> Item interactions
-        user_item_mask = (rows < args.user) & (cols >= args.user)
-        if user_item_mask.sum() > 0:
-            ui_users = rows[user_item_mask]
-            ui_items = cols[user_item_mask] - args.user
-            
-            # Aggregate item embeddings to users
-            user_agg = torch.zeros_like(user_embeds)
-            user_agg.scatter_add_(0, ui_users.unsqueeze(1).expand(-1, args.latdim), 
-                                 item_embeds[ui_items] / user_degrees[ui_users].unsqueeze(1))
-        else:
-            user_agg = torch.zeros_like(user_embeds)
-        
-        # Item -> User interactions  
-        item_user_mask = (rows >= args.user) & (cols < args.user)
-        if item_user_mask.sum() > 0:
-            iu_items = rows[item_user_mask] - args.user
-            iu_users = cols[item_user_mask]
-            
-            # Aggregate user embeddings to items
-            item_agg = torch.zeros_like(item_embeds)
-            item_agg.scatter_add_(0, iu_items.unsqueeze(1).expand(-1, args.latdim),
-                                 user_embeds[iu_users] / item_degrees[iu_items].unsqueeze(1))
-        else:
-            item_agg = torch.zeros_like(item_embeds)
-        
-        # Combine with original embeddings using learnable beta
-        enhanced_user_embeds = (1 - self.beta) * user_embeds + self.beta * user_agg
-        enhanced_item_embeds = (1 - self.beta) * item_embeds + self.beta * item_agg
-        
-        return torch.cat([enhanced_user_embeds, enhanced_item_embeds], dim=0)
 
-# Alternative: Simpler and More Stable UltraGCN
-class SimpleUltraGCNLayer(nn.Module):
-    def __init__(self):
-        super(SimpleUltraGCNLayer, self).__init__()
-        # Simplified version that's guaranteed to work
-        self.alpha = nn.Parameter(torch.tensor(args.ultra_beta))
+
+# Add GraphWave Layer Implementation
+class GraphWaveLayer(nn.Module):
+    def __init__(self, num_scales=10, approximate=True):
+        super(GraphWaveLayer, self).__init__()
+        self.num_scales = num_scales
+        self.approximate = approximate
         
-    def forward(self, adj, embeds):
-        """Simple UltraGCN: weighted self + neighbor aggregation"""
+        # Learnable wavelet scales (logarithmically spaced)
+        self.scales = nn.Parameter(torch.logspace(-2, 2, num_scales))
+        
+        # Projection layers for different scales
+        self.scale_projections = nn.ModuleList([
+            nn.Linear(args.latdim, args.latdim) for _ in range(num_scales)
+        ])
+        
+        # Aggregation weights
+        self.scale_weights = nn.Parameter(torch.ones(num_scales) / num_scales)
+        
+        # Final projection
+        self.final_projection = nn.Linear(args.latdim, args.latdim)
+        self.dropout = nn.Dropout(0.1)
+        
+    def compute_heat_kernel(self, laplacian_eigenvals, scale):
+        """Compute heat kernel: exp(-scale * eigenvals)"""
+        return torch.exp(-scale * laplacian_eigenvals)
+    
+    def approximate_wavelet_transform(self, adj, embeds, scale):
+        """Approximate wavelet transform using heat kernel"""
         try:
-            # Standard sparse matrix multiplication for neighbor aggregation
-            neighbor_agg = torch.spmm(adj, embeds)
+            # Get Laplacian eigenvalues/vectors (approximate for large graphs)
+            L = self.compute_normalized_laplacian(adj)
             
-            # UltraGCN style: learnable combination
-            output = self.alpha * embeds + (1 - self.alpha) * neighbor_agg
+            # Heat kernel approximation: exp(-t*L) ≈ I - t*L + (t*L)^2/2 - ...
+            # For efficiency, use first-order approximation: I - scale*L
+            n_nodes = embeds.size(0)
+            identity = torch.eye(n_nodes, device=embeds.device)
+            
+            if self.approximate:
+                # First-order approximation
+                heat_kernel_approx = identity - scale * L.to_dense()
+                transformed = torch.mm(heat_kernel_approx, embeds)
+            else:
+                # More accurate but expensive matrix exponential
+                heat_kernel = torch.matrix_exp(-scale * L.to_dense())
+                transformed = torch.mm(heat_kernel, embeds)
+                
+            return transformed
+            
+        except Exception as e:
+            print(f"Wavelet transform failed: {e}, using identity")
+            return embeds
+    
+    def compute_normalized_laplacian(self, adj):
+        """Compute normalized Laplacian from adjacency matrix"""
+        # Get degrees
+        degrees = torch.sparse.sum(adj, dim=1).to_dense()
+        degrees = torch.clamp(degrees, min=1e-8)
+        
+        # D^(-1/2)
+        deg_inv_sqrt = torch.pow(degrees, -0.5)
+        deg_inv_sqrt[torch.isinf(deg_inv_sqrt)] = 0.0
+        
+        # Create D^(-1/2) matrix
+        indices = torch.arange(adj.size(0), device=adj.device)
+        deg_matrix = torch.sparse_coo_tensor(
+            torch.stack([indices, indices]), 
+            deg_inv_sqrt, 
+            (adj.size(0), adj.size(0))
+        )
+        
+        # L = I - D^(-1/2) A D^(-1/2)
+        normalized_adj = torch.sparse.mm(torch.sparse.mm(deg_matrix, adj), deg_matrix)
+        
+        # Identity matrix
+        identity_indices = torch.stack([indices, indices])
+        identity_values = torch.ones(adj.size(0), device=adj.device)
+        identity = torch.sparse_coo_tensor(identity_indices, identity_values, adj.shape)
+        
+        # Laplacian = I - normalized_adj
+        laplacian = identity - normalized_adj
+        
+        return laplacian.coalesce()
+    
+    def forward(self, adj, embeds):
+        """GraphWave forward pass"""
+        try:
+            scale_embeddings = []
+            
+            # Apply wavelet transform at different scales
+            for i, scale in enumerate(self.scales):
+                # Wavelet transform at this scale
+                scale_embed = self.approximate_wavelet_transform(adj, embeds, scale)
+                
+                # Project through scale-specific layer
+                scale_embed = self.scale_projections[i](scale_embed)
+                scale_embed = F.relu(scale_embed)
+                
+                scale_embeddings.append(scale_embed)
+            
+            # Weighted combination of scales
+            combined = torch.zeros_like(embeds)
+            weights = F.softmax(self.scale_weights, dim=0)
+            
+            for i, scale_embed in enumerate(scale_embeddings):
+                combined += weights[i] * scale_embed
+            
+            # Final projection and normalization
+            output = self.final_projection(combined)
+            output = self.dropout(output)
+            
+            # Add residual connection
+            output = output + embeds
             
             return output
+            
         except Exception as e:
-            print(f"UltraGCN error: {e}, falling back to GCN")
+            print(f"GraphWave error: {e}, falling back to GCN")
             return torch.spmm(adj, embeds)
 
-# Fallback: Enhanced GCN Layer (if UltraGCN fails)
-class EnhancedGCNLayer(nn.Module):
-    def __init__(self):
-        super(EnhancedGCNLayer, self).__init__()
-        self.dropout = nn.Dropout(0.1)
-        self.weight = nn.Parameter(torch.tensor(1.0))
+# Simple GraphWave Layer (more stable)
+class SimpleGraphWaveLayer(nn.Module):
+    def __init__(self, num_scales=5):
+        super(SimpleGraphWaveLayer, self).__init__()
+        self.num_scales = num_scales
+        
+        # Fixed scales (no learning for stability)
+        self.register_buffer('scales', torch.logspace(-1, 1, num_scales))
+        
+        # Single projection layer
+        self.projection = nn.Linear(args.latdim, args.latdim)
+        self.alpha = nn.Parameter(torch.tensor(0.5))  # Mixing weight
         
     def forward(self, adj, embeds):
-        """Enhanced GCN with learnable weights and dropout"""
-        neighbor_agg = torch.spmm(adj, embeds)
-        output = self.weight * neighbor_agg
-        return self.dropout(output)
+        """Simplified GraphWave using heat diffusion"""
+        try:
+            # Simple heat diffusion: repeatedly apply adjacency
+            diffused_embeds = []
+            current_embed = embeds
+            
+            for i in range(self.num_scales):
+                # Heat diffusion step
+                diffused = torch.spmm(adj, current_embed)
+                diffused_embeds.append(diffused)
+                current_embed = diffused
+            
+            # Average across scales
+            avg_diffused = torch.mean(torch.stack(diffused_embeds), dim=0)
+            
+            # Project and combine
+            projected = self.projection(avg_diffused)
+            output = self.alpha * embeds + (1 - self.alpha) * projected
+            
+            return output
+            
+        except Exception as e:
+            print(f"Simple GraphWave error: {e}, using identity")
+            return embeds
 
-# Updated Model class with error handling
+# Update Model class to include GraphWave
 class Model(nn.Module):
     def __init__(self, gtLayer):
         super(Model, self).__init__()
@@ -151,7 +181,7 @@ class Model(nn.Module):
         self.uEmbeds = nn.Parameter(init(t.empty(args.user, args.latdim)))
         self.iEmbeds = nn.Parameter(init(t.empty(args.item, args.latdim)))
         
-        # Choose layer type with fallback options
+        # Choose layer type with all options including GraphWave
         if getattr(args, 'use_ultragcn', False):
             print("🔥 Using UltraGCN layers")
             try:
@@ -171,18 +201,36 @@ class Model(nn.Module):
                 self.gcnLayers = nn.ModuleList([
                     EnhancedGCNLayer() for _ in range(args.gcn_layer)
                 ])
-        elif getattr(args, 'use_sage', False):
-            print(f"🧠 Using GraphSAGE with aggregator: {getattr(args, 'sage_aggregator', 'mean')}")
-            self.gcnLayers = nn.ModuleList([
-                GraphSAGELayer(aggregator_type=getattr(args, 'sage_aggregator', 'mean')) 
-                for _ in range(args.gcn_layer)
-            ])
+        elif getattr(args, 'use_graphwave', False):
+            print("🌊 Using GraphWave layers")
+            try:
+                if getattr(args, 'simple_wave', False):
+                    print("  -> Simple GraphWave variant")
+                    self.gcnLayers = nn.ModuleList([
+                        SimpleGraphWaveLayer(num_scales=getattr(args, 'wave_scales', 5)) 
+                        for _ in range(args.gcn_layer)
+                    ])
+                else:
+                    print("  -> Full GraphWave implementation")
+                    self.gcnLayers = nn.ModuleList([
+                        GraphWaveLayer(
+                            num_scales=getattr(args, 'wave_scales', 10),
+                            approximate=getattr(args, 'wave_approximate', True)
+                        ) for _ in range(args.gcn_layer)
+                    ])
+            except Exception as e:
+                print(f"GraphWave initialization failed: {e}")
+                print("Falling back to Enhanced GCN")
+                self.gcnLayers = nn.ModuleList([
+                    EnhancedGCNLayer() for _ in range(args.gcn_layer)
+                ])
         else:
             print("📊 Using standard GCN layers")
             self.gcnLayers = nn.ModuleList([GCNLayer() for _ in range(args.gcn_layer)])
         
         self.gtLayers = ResidualGTLayer()
         self.pnnLayers = nn.Sequential(*[PNNLayer() for i in range(args.pnn_layer)])
+
 
     def getEgoEmbeds(self):
         return t.cat([self.uEmbeds, self.iEmbeds], axis=0)
