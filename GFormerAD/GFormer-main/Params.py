@@ -39,7 +39,6 @@ def ParseArgs():
     parser.add_argument('--approximate', dest='approximate', default=-1, type=int, help='k-hop shortest path distance')
     parser.add_argument('--T', type=float, default=2.0, help='Temperature for distillation')
     
-    # ===== CHECKPOINTING PARAMETERS =====
     parser.add_argument('--resume', default=False, action='store_true', help='Resume from latest checkpoint')
     parser.add_argument('--load_checkpoint', default=None, type=str, help='Path to specific checkpoint to load')
     parser.add_argument('--load_best', default=False, action='store_true', help='Load best checkpoint instead of latest')
@@ -52,7 +51,11 @@ def ParseArgs():
     parser.add_argument('--load_weights', type=str, default=None, help='Path to weights file to load')
     parser.add_argument('--sage_aggregator', default='mean', type=str, choices=['mean', 'max', 'lstm', 'pool'], help='GraphSAGE aggregator type')
     parser.add_argument('--sage_dropout', default=0.1, type=float, help='Dropout rate for GraphSAGE layers')
-    parser.add_argument('--use_sage', default=True, action='store_true', help='Use GraphSAGE instead of GCN')
+    parser.add_argument('--use_sage', default=False, action='store_true', help='Use GraphSAGE instead of GCN')
+    parser.add_argument('--use_ultragcn', default=False, action='store_true', help='Use UltraGCN layers instead of GCN')
+    parser.add_argument('--simple_ultra', default=False, action='store_true', help='Use simplified UltraGCN variant')
+    parser.add_argument('--ultra_beta', default=0.5, type=float, help='UltraGCN beta parameter for balancing self vs neighbors')
+    parser.add_argument('--ultra_gamma', default=1e-4, type=float, help='UltraGCN gamma parameter for regularization')
     return parser.parse_args()
 
 args = ParseArgs()

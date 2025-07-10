@@ -12,48 +12,121 @@ import random
 init = nn.init.xavier_uniform_
 uniformInit = nn.init.uniform
 
-# Add this class after your existing imports
-class GraphSAGELayer(nn.Module):
-    def __init__(self, aggregator_type='mean'):
-        super(GraphSAGELayer, self).__init__()
-        self.aggregator_type = aggregator_type
+
+
+init = nn.init.xavier_uniform_
+uniformInit = nn.init.uniform
+
+# UltraGCN Layer Implementation
+class UltraGCNLayer(nn.Module):
+    def __init__(self):
+        super(UltraGCNLayer, self).__init__()
+        # UltraGCN uses direct optimization without message passing
+        self.beta = nn.Parameter(torch.tensor(0.5))  # Balancing parameter
+        self.gamma = nn.Parameter(torch.tensor(1e-4))  # Regularization weight
         
-        # Simple linear combination (very conservative)
-        self.self_weight = nn.Parameter(torch.tensor(0.5))  # Weight for self
-        self.neigh_weight = nn.Parameter(torch.tensor(0.5))  # Weight for neighbors
+        # Constraint matrices (will be computed from adjacency)
+        self.constraint_mat = {}
         
-        # Optional: small linear transformation
-        self.linear = nn.Linear(args.latdim, args.latdim, bias=False)
+    def compute_constraint_matrices(self, adj):
+        """Compute constraint matrices for UltraGCN"""
+        # Get the adjacency matrix in COO format
+        rows, cols = adj._indices()[0, :], adj._indices()[1, :]
         
-        # Initialize to identity transformation
-        nn.init.eye_(self.linear.weight)
+        # Compute user and item degrees
+        user_deg = torch.sparse.sum(adj[:args.user, args.user:], dim=1).to_dense()
+        item_deg = torch.sparse.sum(adj[args.user:, :args.user], dim=1).to_dense()
+        
+        # Avoid division by zero
+        user_deg = torch.clamp(user_deg, min=1e-8)
+        item_deg = torch.clamp(item_deg, min=1e-8)
+        
+        # Create constraint matrices
+        constraint_mat = {}
+        constraint_mat['user_deg'] = user_deg
+        constraint_mat['item_deg'] = item_deg
+        
+        return constraint_mat
         
     def forward(self, adj, embeds):
-        # Standard neighbor aggregation (same as GCN)
+        """
+        UltraGCN forward pass - simplified without explicit message passing
+        """
+        user_embeds = embeds[:args.user]
+        item_embeds = embeds[args.user:]
+        
+        # Compute constraint matrices if not cached
+        if not hasattr(self, '_constraint_computed'):
+            self.constraint_mat = self.compute_constraint_matrices(adj)
+            self._constraint_computed = True
+        
+        # UltraGCN's core idea: direct optimization with constraints
+        # Instead of message passing, use weighted combination based on graph structure
+        
+        # Get interaction matrix
+        rows, cols = adj._indices()[0, :], adj._indices()[1, :]
+        user_rows = rows[rows < args.user]
+        item_cols = cols[rows < args.user] - args.user  # Adjust for item indexing
+        
+        # Compute enhanced embeddings using UltraGCN's approach
+        enhanced_user_embeds = user_embeds.clone()
+        enhanced_item_embeds = item_embeds.clone()
+        
+        if len(user_rows) > 0:
+            # For users: aggregate from their interacted items
+            item_contributions = item_embeds[item_cols]
+            user_degrees = self.constraint_mat['user_deg'][user_rows].unsqueeze(1)
+            
+            # Weight by inverse degree (UltraGCN style)
+            weighted_contributions = item_contributions / (user_degrees + 1e-8)
+            
+            # Aggregate back to users using scatter_add
+            enhanced_user_embeds = enhanced_user_embeds.scatter_add(
+                0, user_rows.unsqueeze(1).expand(-1, args.latdim), 
+                self.beta * weighted_contributions
+            )
+        
+        # Symmetric operation for items
+        item_rows = rows[rows >= args.user] - args.user
+        user_cols = cols[rows >= args.user]
+        
+        if len(item_rows) > 0:
+            user_contributions = user_embeds[user_cols]
+            item_degrees = self.constraint_mat['item_deg'][item_rows].unsqueeze(1)
+            
+            weighted_contributions = user_contributions / (item_degrees + 1e-8)
+            
+            enhanced_item_embeds = enhanced_item_embeds.scatter_add(
+                0, item_rows.unsqueeze(1).expand(-1, args.latdim),
+                self.beta * weighted_contributions
+            )
+        
+        # Combine original and enhanced embeddings
+        final_embeds = torch.cat([
+            (1 - self.beta) * user_embeds + self.beta * enhanced_user_embeds,
+            (1 - self.beta) * item_embeds + self.beta * enhanced_item_embeds
+        ], dim=0)
+        
+        return final_embeds
+
+# Alternative Simplified UltraGCN Layer
+class SimpleUltraGCNLayer(nn.Module):
+    def __init__(self):
+        super(SimpleUltraGCNLayer, self).__init__()
+        # Ultra-simplified version that works like enhanced GCN
+        self.alpha = nn.Parameter(torch.tensor(0.6))  # Self-connection weight
+        
+    def forward(self, adj, embeds):
+        """Simple UltraGCN: direct neighbor aggregation with learnable weights"""
+        # Standard neighbor aggregation
         neighbor_agg = torch.spmm(adj, embeds)
         
-        if self.aggregator_type == 'mean':
-            # GraphSAGE: combine self + neighbors with learnable weights
-            output = self.self_weight * embeds + self.neigh_weight * neighbor_agg
-            
-        elif self.aggregator_type == 'concat':
-            # Concatenate self and neighbor embeddings, then project
-            combined = torch.cat([embeds, neighbor_agg], dim=1)
-            # Need a linear layer that maps 2*latdim -> latdim
-            if not hasattr(self, 'concat_linear'):
-                self.concat_linear = nn.Linear(2 * args.latdim, args.latdim, bias=False).cuda()
-                nn.init.xavier_uniform_(self.concat_linear.weight)
-            output = self.concat_linear(combined)
-            
-        else:  # fallback to GCN
-            output = neighbor_agg
-            
-        # Optional linear transformation
-        output = self.linear(output)
+        # UltraGCN style: weighted combination of self and neighbors
+        output = self.alpha * embeds + (1 - self.alpha) * neighbor_agg
         
         return output
 
-# Update your Model class
+# Update your Model class to use UltraGCN
 class Model(nn.Module):
     def __init__(self, gtLayer):
         super(Model, self).__init__()
@@ -61,8 +134,20 @@ class Model(nn.Module):
         self.uEmbeds = nn.Parameter(init(t.empty(args.user, args.latdim)))
         self.iEmbeds = nn.Parameter(init(t.empty(args.item, args.latdim)))
         
-        # CHOICE: Use GraphSAGE or GCN based on parameter
-        if getattr(args, 'use_sage', False):
+        # CHOICE: Use UltraGCN, GraphSAGE, or GCN based on parameter
+        if getattr(args, 'use_ultragcn', False):
+            print("Using UltraGCN layers")
+            if getattr(args, 'simple_ultra', False):
+                print("  -> Simple UltraGCN variant")
+                self.gcnLayers = nn.ModuleList([
+                    SimpleUltraGCNLayer() for _ in range(args.gcn_layer)
+                ])
+            else:
+                print("  -> Full UltraGCN implementation")
+                self.gcnLayers = nn.ModuleList([
+                    UltraGCNLayer() for _ in range(args.gcn_layer)
+                ])
+        elif getattr(args, 'use_sage', False):
             print(f"Using GraphSAGE with aggregator: {getattr(args, 'sage_aggregator', 'mean')}")
             self.gcnLayers = nn.ModuleList([
                 GraphSAGELayer(aggregator_type=getattr(args, 'sage_aggregator', 'mean')) 
@@ -88,7 +173,7 @@ class Model(nn.Module):
         emb, _ = self.gtLayers(sub, embeds)
         subList = [embeds, args.gtw*emb]
 
-        # Use either GraphSAGE or GCN layers
+        # Use UltraGCN, GraphSAGE, or GCN layers
         for i, layer in enumerate(self.gcnLayers):
             embeds = layer(encoderAdj, embedsLst[-1])
             embeds2 = layer(sub, embedsLst[-1])
