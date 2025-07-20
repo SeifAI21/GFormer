@@ -37,6 +37,19 @@ class Coach:
         self.best_recall = 0.0
         self.best_ndcg = 0.0
         self.start_epoch = 0
+        self.l2_reg_weight = getattr(args, 'ultragcn_l2_reg', 1e-4)
+
+    def get_ultragcn_l2_loss(self):
+        """Get L2 regularization loss from UltraGCN layers"""
+        l2_loss = 0
+        if hasattr(self.model, 'get_total_l2_loss'):
+            l2_loss += self.model.get_total_l2_loss()
+        
+        # Add L2 loss for main embeddings
+        l2_loss += torch.norm(self.model.uEmbeds, p=2) * self.l2_reg_weight
+        l2_loss += torch.norm(self.model.iEmbeds, p=2) * self.l2_reg_weight
+        return l2_loss
+        return l2_loss
 
     def create_checkpoint_dirs(self):
         """Create checkpoint directories if they don't exist"""
@@ -402,6 +415,8 @@ class Coach:
         self.masker = RandomMaskSubgraphs(args.user, args.item)
         self.sampler = LocalGraph(self.gtLayer)
 
+
+    
     def trainEpoch(self):
         trnLoader = self.handler.trnLoader
         trnLoader.dataset.negSampling()
@@ -418,7 +433,7 @@ class Coach:
             poss = poss.long().cuda()
             negs = negs.long().cuda()
 
-            # Générez les cibles de distillation
+            # Generate distillation targets
             with torch.no_grad():
                 distill_usrEmbeds, distill_itmEmbeds, distill_cList, distill_subLst = self.distill_model(
                     self.handler, False, sub, cmp, encoderAdj, decoderAdj)
@@ -444,27 +459,31 @@ class Coach:
                 usrEmbeds,
                 itmEmbeds) + args.ctra * contrastNCE(ancs, subLst, cList)
 
-            # Calculez les pertes de distillation
+            # Calculate distillation losses
             distill_loss_usr = F.mse_loss(usrEmbeds, distill_usrEmbeds)
             distill_loss_itm = F.mse_loss(itmEmbeds, distill_itmEmbeds)
             distill_loss_cList = F.mse_loss(cList, distill_cList)
             distill_loss_subLst = F.mse_loss(subLst, distill_subLst)
 
-            # Combiner les pertes de distillation
+            # Combine distillation losses
             distill_loss = (distill_loss_usr + distill_loss_itm + distill_loss_cList + distill_loss_subLst) * self.distill_weight
 
-            # Utilisez la perte de distillation pour la mise à jour du modèle
-            loss = bprLoss + regLoss + contrastLoss + args.b2 * bprLoss2 + distill_loss
+            # ADD L2 LOSS FOR ULTRAGCN ANTI-OVERFITTING
+            ultragcn_l2_loss = self.get_ultragcn_l2_loss()
+
+            # Combine all losses including UltraGCN L2 regularization
+            loss = bprLoss + regLoss + contrastLoss + args.b2 * bprLoss2 + distill_loss + ultragcn_l2_loss
+            
             epLoss += loss.item()
             epPreLoss += bprLoss.item()
             self.opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=20, norm_type=2)
             self.opt.step()
-            log('Step %d/%d: loss = %.3f, regLoss = %.3f, clLoss = %.3f        ' % (
-                i, steps, loss, regLoss, contrastLoss), save=False, oneline=True)
+            log('Step %d/%d: loss = %.3f, regLoss = %.3f, clLoss = %.3f, ultraL2 = %.3f        ' % (
+                i, steps, loss, regLoss, contrastLoss, ultragcn_l2_loss), save=False, oneline=True)
 
-        # Mettez à jour le modèle de distillation
+        # Update distillation model
         self.distill_model.load_state_dict(self.model.state_dict())
 
         ret = dict()
@@ -505,12 +524,16 @@ class Coach:
 
                 contrastLoss = (contrast(ancs, usrEmbeds) + contrast(poss, itmEmbeds)) * args.ssl_reg + contrast(
                     ancs, usrEmbeds, itmEmbeds) + args.ctra * contrastNCE(ancs, subLst, cList)
-                loss = bprLoss + regLoss + contrastLoss + args.b2 * bprLoss2
+                
+                # ADD L2 LOSS FOR VALIDATION TOO
+                ultragcn_l2_loss = self.get_ultragcn_l2_loss()
+                
+                loss = bprLoss + regLoss + contrastLoss + args.b2 * bprLoss2 + ultragcn_l2_loss
 
                 epLoss += loss.item()
                 epPreLoss += bprLoss.item()
-                log('Validation Step %d/%d: loss = %.3f, regLoss = %.3f, clLoss = %.3f        ' % (
-                    i, steps, loss, regLoss, contrastLoss), save=False, oneline=True)
+                log('Validation Step %d/%d: loss = %.3f, regLoss = %.3f, clLoss = %.3f, ultraL2 = %.3f        ' % (
+                    i, steps, loss, regLoss, contrastLoss, ultragcn_l2_loss), save=False, oneline=True)
                 
         ret = dict()
         if steps > 0:
@@ -520,7 +543,8 @@ class Coach:
             ret['Loss'] = 0
             ret['preLoss'] = 0
         return ret
-            
+
+                
     def testEpoch(self):
         # FIXED: Ensure model is in evaluation mode
         self.model.eval()

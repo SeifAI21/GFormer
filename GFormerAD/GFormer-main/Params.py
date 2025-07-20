@@ -56,6 +56,17 @@ def ParseArgs():
     parser.add_argument('--simple_ultra', default=False, action='store_true', help='Use simplified UltraGCN variant')
     parser.add_argument('--ultra_beta', default=0.5, type=float, help='UltraGCN beta parameter for balancing self vs neighbors')
     parser.add_argument('--ultra_gamma', default=1e-4, type=float, help='UltraGCN gamma parameter for regularization')
+    # Add these anti-overfitting parameters
+    parser.add_argument('--ultragcn_l2_reg', default=1e-4, type=float, help='L2 regularization for UltraGCN')
+    parser.add_argument('--simple_ultra_dropout', default=0.15, type=float, help='Dropout rate for SimpleUltraGCN')
+    parser.add_argument('--simple_ultra_l2_reg', default=1e-4, type=float, help='L2 reg for SimpleUltraGCN')
+    parser.add_argument('--ultra_dropout', default=0.1, type=float, help='Dropout rate for UltraGCN')
+    parser.add_argument('--ultra_l2_reg', default=1e-4, type=float, help='L2 regularization for UltraGCN')
+    parser.add_argument('--embed_dropout', default=0.1, type=float, help='Embedding dropout rate')
+
+    # Early stopping parameters  
+    parser.add_argument('--patience', default=5, type=int, help='Early stopping patience')
+    parser.add_argument('--min_delta', default=0.001, type=float, help='Minimum improvement threshold')
     return parser.parse_args()
 
 args = ParseArgs()
