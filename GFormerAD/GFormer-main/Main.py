@@ -185,6 +185,36 @@ class Coach:
         torch.save(weights, weights_path)
         log(f'Model weights saved: {weights_path}')
 
+    # def load_model_weights(self, weights_path):
+    #     """Enhanced model weights loading for evaluation"""
+    #     if not os.path.exists(weights_path):
+    #         log(f'Weights file not found: {weights_path}')
+    #         return False
+        
+    #     try:
+    #         weights = torch.load(weights_path, 
+    #                         map_location='cuda' if torch.cuda.is_available() else 'cpu',
+    #                         weights_only=False)
+            
+    #         # Load main model weights
+    #         if 'model_state_dict' in weights:
+    #             self.model.load_state_dict(weights['model_state_dict'])
+    #             log('Main model weights loaded')
+    #         else:
+    #             # Legacy format - weights directly stored
+    #             self.model.load_state_dict(weights)
+    #             log('Main model weights loaded (legacy format)')
+            
+    #         # Copy to distillation model for consistency
+    #         self.distill_model.load_state_dict(self.model.state_dict())
+    #         log('Distillation model synchronized with main model')
+            
+    #         log(f'Model weights loaded successfully: {weights_path}')
+    #         return True
+            
+    #     except Exception as e:
+    #         log(f'Error loading weights: {e}')
+    #         return False
     def load_model_weights(self, weights_path):
         """Enhanced model weights loading for evaluation"""
         if not os.path.exists(weights_path):
@@ -192,28 +222,98 @@ class Coach:
             return False
         
         try:
+            # Determine file extension
+            file_ext = weights_path.split('.')[-1].lower()
+            log(f'Loading weights file with extension: .{file_ext}')
+            
             weights = torch.load(weights_path, 
                             map_location='cuda' if torch.cuda.is_available() else 'cpu',
                             weights_only=False)
             
-            # Load main model weights
-            if 'model_state_dict' in weights:
-                self.model.load_state_dict(weights['model_state_dict'])
-                log('Main model weights loaded')
+            # Handle different weight file formats
+            if file_ext == 'mod':
+                # Handle .mod files (legacy GFormer format)
+                if 'model' in weights:
+                    # Method 1: Load the entire model object
+                    log('Loading .mod file with model object')
+                    loaded_model = weights['model']
+                    
+                    # Copy the parameters from loaded model to current model
+                    self.model.load_state_dict(loaded_model.state_dict())
+                    log('Model state dict loaded from .mod file')
+                    
+                else:
+                    log('Invalid .mod file format - no model key found')
+                    return False
+                    
             else:
-                # Legacy format - weights directly stored
-                self.model.load_state_dict(weights)
-                log('Main model weights loaded (legacy format)')
+                # Handle .pth, .pt files
+                if 'model_state_dict' in weights:
+                    # Standard checkpoint format
+                    self.model.load_state_dict(weights['model_state_dict'])
+                    log('Model state dict loaded from checkpoint')
+                    
+                elif 'model' in weights:
+                    # Handle nested model format
+                    if hasattr(weights['model'], 'state_dict'):
+                        self.model.load_state_dict(weights['model'].state_dict())
+                        log('Model state dict loaded from nested model')
+                    else:
+                        self.model = weights['model']
+                        log('Entire model object loaded')
+                        
+                else:
+                    # Direct state dict
+                    self.model.load_state_dict(weights)
+                    log('Direct state dict loaded')
             
-            # Copy to distillation model for consistency
+            # Sync distillation model
             self.distill_model.load_state_dict(self.model.state_dict())
             log('Distillation model synchronized with main model')
+            
+            # Recreate optimizer with loaded model parameters
+            self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
+            log('Optimizer recreated with loaded model parameters')
             
             log(f'Model weights loaded successfully: {weights_path}')
             return True
             
         except Exception as e:
             log(f'Error loading weights: {e}')
+            log('Trying alternative loading method...')
+            
+            # Alternative method: Try loading as legacy format
+            try:
+                return self.load_legacy_model(weights_path)
+            except Exception as e2:
+                log(f'Alternative loading also failed: {e2}')
+                return False
+
+    def load_legacy_model(self, weights_path):
+        """Load legacy .mod format models"""
+        try:
+            log('Attempting legacy model loading...')
+            ckp = torch.load(weights_path, weights_only=False)
+            
+            if 'model' in ckp:
+                # Replace current model with loaded model
+                self.model = ckp['model']
+                
+                # Recreate distillation model with same architecture
+                self.distill_model = Model(self.ResidualGTLayer).cuda()
+                self.distill_model.load_state_dict(self.model.state_dict())
+                
+                # Recreate optimizer
+                self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
+                
+                log('Legacy model loaded successfully')
+                return True
+            else:
+                log('No model found in legacy file')
+                return False
+                
+        except Exception as e:
+            log(f'Legacy loading failed: {e}')
             return False
 
     def makePrint(self, name, ep, reses, save):
