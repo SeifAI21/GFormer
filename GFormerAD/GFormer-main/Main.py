@@ -614,102 +614,267 @@ class Coach:
         ret = ret[:-2] + '  '
         return ret
 
-    def run(self):
-        self.prepareModel()
-        log('Model Prepared')
+    # Add this method to the Coach class to handle transfer learning properly:
+
+def load_model_weights_for_transfer(self, weights_path):
+    """Load weights for transfer learning, handling dataset size mismatches"""
+    if not os.path.exists(weights_path):
+        log(f'Weights file not found: {weights_path}')
+        return False
+    
+    try:
+        log(f'Loading weights for transfer learning: {weights_path}')
+        weights = torch.load(weights_path, 
+                        map_location='cuda' if torch.cuda.is_available() else 'cpu',
+                        weights_only=False)
         
-        # FIXED: Updated checkpoint loading logic to handle new parameters
-        checkpoint_loaded = False
+        if 'model' in weights:
+            source_model = weights['model']
+            source_state = source_model.state_dict()
+        else:
+            source_state = weights
+        
+        # Get current model state
+        current_state = self.model.state_dict()
+        
+        # Transfer compatible layers only (skip embeddings and size-dependent layers)
+        transferred_layers = []
+        skipped_layers = []
+        
+        for name, param in source_state.items():
+            # Skip user and item embeddings (different dataset sizes)
+            if name in ['uEmbeds', 'iEmbeds']:
+                skipped_layers.append(f"{name}: Different dataset size")
+                log(f"   ⚠️  Skipping {name}: Dataset size mismatch")
+                continue
+            
+            if name in current_state:
+                if param.shape == current_state[name].shape:
+                    # Compatible shape - transfer directly
+                    current_state[name] = param.clone()
+                    transferred_layers.append(name)
+                    log(f"   ✅ Transferred: {name} {param.shape}")
+                else:
+                    # Incompatible shape - skip
+                    skipped_layers.append(f"{name}: {param.shape} -> {current_state[name].shape}")
+                    log(f"   ⚠️  Skipping {name}: shape mismatch {param.shape} vs {current_state[name].shape}")
+            else:
+                skipped_layers.append(f"{name}: not found in target model")
+                log(f"   ⚠️  Skipping {name}: not found in target model")
+        
+        # Load the modified state dict
+        self.model.load_state_dict(current_state)
+        
+        # Important: Initialize embeddings randomly for new dataset
+        log("🔄 Reinitializing embeddings for new dataset...")
+        nn.init.xavier_uniform_(self.model.uEmbeds)
+        nn.init.xavier_uniform_(self.model.iEmbeds)
+        
+        # Sync distillation model
+        self.distill_model.load_state_dict(self.model.state_dict())
+        
+        log(f"✅ Transfer learning completed:")
+        log(f"   Transferred layers: {len(transferred_layers)}")
+        log(f"   Skipped layers: {len(skipped_layers)}")
+        log(f"   Embeddings reinitialized for dataset: {args.data}")
+        
+        # Show transferred layers
+        if transferred_layers:
+            log("   📋 Successfully transferred:")
+            for layer in transferred_layers:
+                log(f"      • {layer}")
+        
+        return True
+        
+    except Exception as e:
+        log(f'Error in transfer learning: {e}')
+        import traceback
+        traceback.print_exc()
+        return False
 
-        if hasattr(args, 'load_weights') and args.load_weights:
-            checkpoint_loaded = self.load_model_weights(args.load_weights)
-            if checkpoint_loaded:
-                log('Model weights loaded successfully')
+# Modify the run method to use the transfer learning function:
+def run(self):
+    self.prepareModel()
+    log('Model Prepared')
+    
+    checkpoint_loaded = False
 
-                # Reapply freezing after loading weights
-
+    if hasattr(args, 'load_weights') and args.load_weights:
+        # Use transfer learning for cross-dataset loading
+        checkpoint_loaded = self.load_model_weights_for_transfer(args.load_weights)
+        if checkpoint_loaded:
+            log('✅ Transfer learning completed successfully')
+            # Apply freezing strategy after loading (if not already applied)
+            if not hasattr(self, 'frozen_layers') or len(self.frozen_layers) == 0:
                 if (args.freeze_first_percent > 0 or args.freeze_last_percent > 0 or 
                     args.freeze_embeddings or args.freeze_backbone):
-                    log("🔄 Reapplying freezing strategy after weight loading...")
+                    log("🔄 Applying freezing strategy for fine-tuning...")
                     self.apply_freezing_strategy()
                     self.setup_fine_tuning_optimizer()
-
-                # Set evaluation mode for weights-only loading
-                if args.epoch == 0:
-                    self.model.eval()
-                    self.distill_model.eval()
-                    log('Models set to evaluation mode')
+            
+            if args.epoch == 0:
+                self.model.eval()
+                self.distill_model.eval()
+                log('Models set to evaluation mode')
             else:
-                log('Failed to load model weights')
-        
-        elif hasattr(args, 'load_checkpoint') and args.load_checkpoint:
-        
-            # Load specific checkpoint file
-            checkpoint_loaded = self.load_checkpoint(args.load_checkpoint)
-            if checkpoint_loaded:
-                log('Specific checkpoint loaded successfully')
-                log(f'Loaded from: {args.load_checkpoint}')
-            else:
-                log('Failed to load specific checkpoint, starting fresh')
-        
-        elif hasattr(args, 'load_best') and args.load_best:
-            # Load best checkpoint
-            checkpoint_loaded = self.load_checkpoint(load_best=True)
-            if checkpoint_loaded:
-                log('Best checkpoint loaded successfully')
-            else:
-                log('No best checkpoint found, starting fresh')
-        
-        elif hasattr(args, 'resume') and args.resume:
-            # Resume from latest checkpoint
-            checkpoint_loaded = self.load_checkpoint()
-            if checkpoint_loaded:
-                log('Resumed from latest checkpoint')
-            else:
-                log('No checkpoint found, starting fresh')
-        
-        elif args.load_model != None:
-            # Legacy model loading
+                # For training, ensure we're in training mode
+                self.model.train()
+                self.distill_model.train()
+                log('Models set to training mode for fine-tuning')
+        else:
+            log('❌ Failed to load model weights for transfer learning')
+            # Continue without loading (train from scratch)
+    
+    elif hasattr(args, 'load_checkpoint') and args.load_checkpoint:
+        checkpoint_loaded = self.load_checkpoint(args.load_checkpoint)
+        if checkpoint_loaded:
+            log('Specific checkpoint loaded successfully')
+        else:
+            log('Failed to load specific checkpoint, starting fresh')
+    
+    elif hasattr(args, 'load_best') and args.load_best:
+        checkpoint_loaded = self.load_checkpoint(load_best=True)
+        if checkpoint_loaded:
+            log('Best checkpoint loaded successfully')
+        else:
+            log('No best checkpoint found, starting fresh')
+    
+    elif hasattr(args, 'resume') and args.resume:
+        checkpoint_loaded = self.load_checkpoint()
+        if checkpoint_loaded:
+            log('Resumed from latest checkpoint')
+        else:
+            log('No checkpoint found, starting fresh')
+    
+    elif args.load_model != None:
+        try:
             self.loadModel()
             checkpoint_loaded = True
             log('Legacy model loaded successfully')
+        except:
+            log('Failed to load legacy model, starting fresh')
+            checkpoint_loaded = False
+    
+    else:
+        log('Model Initialized from scratch')
+    
+    bestRes = None
+    result = []
+    
+    if args.epoch == 0:
+        log('Evaluation-only mode (epoch=0)')
+        if not checkpoint_loaded:
+            log('ERROR: No checkpoint loaded for evaluation!')
+            log('Please provide a valid checkpoint path using --load_checkpoint')
+            log('Example: --load_checkpoint /path/to/your/checkpoint.pth')
+            return
         
-        else:
-            log('Model Initialized')
+        self.model.eval()
+        self.distill_model.eval()
         
-        bestRes = None
-        result = []
+        reses = self.testEpoch()
+        log(self.makePrint('Evaluation', 0, reses, True))
         
-        # FIXED: Handle evaluation-only mode (epoch=0) with better error handling
-        if args.epoch == 0:
-            log('Evaluation-only mode (epoch=0)')
-            if not checkpoint_loaded:
-                log('ERROR: No checkpoint loaded for evaluation!')
-                log('Please provide a valid checkpoint path using --load_checkpoint')
-                log('Example: --load_checkpoint /path/to/your/checkpoint.pth')
-                return
-            
-            # Set models to evaluation mode
+        bestRes = reses
+        
+        torch.save([reses], f"Evaluation_result_{args.data}.pkl")
+        log('Evaluation completed and results saved')
+        
+        if bestRes is not None:
+            log(self.makePrint('Best Result', 0, bestRes, True))
+        
+        return
+    
+    # Training loop
+    log(f"🚀 Starting training for {args.epoch} epochs...")
+    
+    for ep in range(self.start_epoch, args.epoch):
+        if hasattr(self, 'current_epoch'):
+            self.current_epoch = ep
+        
+        self.model.train()
+        self.distill_model.train()
+        
+        tstFlag = (ep % args.tstEpoch == 0)
+        
+        try:
+            reses = self.trainEpoch()
+            log(self.makePrint('Train', ep, reses, tstFlag))
+        except Exception as e:
+            log(f"❌ Training error at epoch {ep}: {e}")
+            import traceback
+            traceback.print_exc()
+            break
+        
+        if tstFlag:
             self.model.eval()
             self.distill_model.eval()
             
-            # Run evaluation
-            reses = self.testEpoch()
-            log(self.makePrint('Evaluation', 0, reses, True))
-            
-            # FIXED: Set bestRes for evaluation-only mode
-            bestRes = reses
-            
-            # Save evaluation results
-            torch.save([reses], f"Evaluation_result_{args.data}.pkl")
-            log('Evaluation completed and results saved')
-            
-            # Print best results for evaluation-only mode
-            if bestRes is not None:
-                log(self.makePrint('Best Result', 0, bestRes, True))
-            
-            return
+            try:
+                reses = self.testEpoch()
+                log(self.makePrint('Test', ep, reses, tstFlag))
+                
+                is_best = reses['Recall'] > self.best_recall
+                if is_best:
+                    self.best_recall = reses['Recall']
+                    self.best_ndcg = reses['NDCG']
+                    bestRes = reses
+                
+                # Save checkpoint
+                if hasattr(args, 'save_freq') and (ep % args.save_freq == 0 or is_best):
+                    self.save_checkpoint(ep, is_best=is_best)
+                else:
+                    self.save_checkpoint(ep, is_best=is_best)
+                
+                # Save weights
+                if hasattr(args, 'save_weights_freq') and (ep % args.save_weights_freq == 0):
+                    self.save_model_weights(ep)
+                elif ep % (args.tstEpoch * 2) == 0:
+                    self.save_model_weights(ep)
+                
+                self.saveHistory()
+                result.append(reses)
+                
+                if bestRes is None:
+                    bestRes = reses
+                    
+            except Exception as e:
+                log(f"❌ Testing error at epoch {ep}: {e}")
+                import traceback
+                traceback.print_exc()
         
+        elif hasattr(args, 'save_freq') and (ep % args.save_freq == 0):
+            self.save_checkpoint(ep, is_best=False)
+        elif ep % 10 == 0:
+            self.save_checkpoint(ep, is_best=False)
+        
+        print()
+    
+    if args.epoch > 0:
+        try:
+            self.model.eval()
+            self.distill_model.eval()
+            
+            reses = self.testEpoch()
+            result.append(reses)
+            
+            self.save_checkpoint(args.epoch - 1, is_final=True)
+            torch.save(result, f"Transfer_result_{args.data}.pkl")
+            
+            log(self.makePrint('Final Test', args.epoch, reses, True))
+            
+            if bestRes is not None:
+                log(self.makePrint('Best Result', args.epoch, bestRes, True))
+            else:
+                log('No best result available (training was too short)')
+            
+            self.saveHistory()
+            
+        except Exception as e:
+            log(f"❌ Final evaluation error: {e}")
+            import traceback
+            traceback.print_exc()
+
         # Rest of the training loop 
         # for ep in range(self.start_epoch, args.epoch):
         #     # Set models to training mode
