@@ -49,37 +49,23 @@ class DataHandler:
         # Using Dijkstra's method with cutoff
         dists_dict[node] = nx.single_source_dijkstra_path_length(graph, node, cutoff=cutoff)
       return dists_dict
+    # In DataHandler class, replace reset_cache_for_transfer(...)
     def reset_cache_for_transfer(self):
-        """Reset all cached data structures when transferring between datasets of different dimensions"""
-        # Reset anchor set related caches
-        if hasattr(self, 'anchorset_id'):
-            delattr(self, 'anchorset_id')
-        if hasattr(self, 'dists_array'):
-            delattr(self, 'dists_array')
-        if hasattr(self, 'anchor_adj'):
-            delattr(self, 'anchor_adj')
-            
-        # CRITICAL FIX: Reset the adjacency matrix
-        if hasattr(self, 'torchBiAdj'):
-            log("🔄 Rebuilding adjacency matrix for new dimensions...")
-            
-            # Get current dimensions
-            num_users = args.user
-            num_items = args.item
-            log(f"📊 New graph dimensions: users={num_users}, items={num_items}, total={num_users+num_items}")
-            
-            # Reload training data to rebuild adjacency matrix
-            trnMat = self.loadOneFile(self.trnfile)
-            self.torchBiAdj = self.makeTorchAdj(trnMat)
-            self.allOneAdj = self.makeAllOne(self.torchBiAdj)
-            
-        # Reset PNN module caches if they exist
-        if hasattr(self, 'pnn_cache'):
-            delattr(self, 'pnn_cache')
-            
-        # Force preselection of anchor set with new dimensions
-        log("🔄 Cached anchor sets reset for new dataset dimensions")
+        """Reset all cached data structures when swapping dataset dims."""
+        # Remove old caches
+        for attr in ['anchorset_id', 'dists_array', 'anchor_adj', 'pnn_cache']:
+            if hasattr(self, attr):
+                delattr(self, attr)
+
+        log("🔄 Rebuilding adjacency matrix for new dimensions…")
+        # Reload training matrix and rebuild adjacency
+        trnMat = self.loadOneFile(self.trnfile)
+        self.torchBiAdj = self.makeTorchAdj(trnMat)
+        self.allOneAdj = self.makeAllOne(self.torchBiAdj)
+
+        log("🔄 Resetting anchor sets for new graph…")
         self.preSelect_anchor_set()
+
 
     def get_random_anchorset(self):
         n = self.num_nodes

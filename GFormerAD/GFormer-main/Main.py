@@ -573,126 +573,74 @@ class Coach:
             log(f'Legacy loading failed: {e}')
             return False
 
+# In Coach class, replace load_model_weights_for_transfer(...)
     def load_model_weights_for_transfer(self, weights_path):
         """Load weights for transfer learning, handling dataset size mismatches"""
         if not os.path.exists(weights_path):
             log(f'Weights file not found: {weights_path}')
             return False
-        
+
         try:
             log(f'Loading weights for transfer learning: {weights_path}')
-            
-            # Determine file extension
-            file_ext = weights_path.split('.')[-1].lower()
-            log(f'Loading weights file with extension: .{file_ext}')
-            
-            weights = torch.load(weights_path, 
+            # Load checkpoint
+            ckpt = torch.load(weights_path,
                             map_location='cuda' if torch.cuda.is_available() else 'cpu',
                             weights_only=False)
-            
-            # Extract source model state
-            if file_ext == 'mod' and 'model' in weights:
-                source_model = weights['model']
-                source_state = source_model.state_dict()
-                log('Extracted state dict from .mod file')
-            elif 'model_state_dict' in weights:
-                source_state = weights['model_state_dict']
-                log('Using model_state_dict from checkpoint')
-            elif 'model' in weights and hasattr(weights['model'], 'state_dict'):
-                source_state = weights['model'].state_dict()
-                log('Extracted state dict from nested model')
+            # Extract source state dict
+            if 'model_state_dict' in ckpt:
+                source_state = ckpt['model_state_dict']
+            elif 'model' in ckpt and hasattr(ckpt['model'], 'state_dict'):
+                source_state = ckpt['model'].state_dict()
             else:
-                source_state = weights
-                log('Using direct state dict')
-            
-            # Get current model state
+                source_state = ckpt
+
             current_state = self.model.state_dict()
-            modified_state = {}
-            
-            # Transfer compatible layers only
-            transferred_layers = []
-            skipped_layers = []
-            total_transferred_params = 0
-            
-            # First, copy all current model parameters to modified_state
-            for name, param in current_state.items():
-                modified_state[name] = param.clone()
-            
+            modified_state = {k: v.clone() for k, v in current_state.items()}
+            transferred_layers, skipped_layers = [], []
+
+            # Transfer only compatible weights, skip embeddings
             for name, param in source_state.items():
-                # skip any key that starts with the embedding module
-                if name.startswith('uEmbeds') or name.startswith('iEmbeds'):
-                    log(f"Skipping {name}: dataset size mismatch")
+                if name.startswith('uEmbeds.') or name.startswith('iEmbeds.'):
+                    log(f"⚠️  Skipping {name}: dataset size mismatch")
                     skipped_layers.append(name)
                     continue
-
-                
-                if name in current_state:
-                    if param.shape == current_state[name].shape:
-                        # Compatible shape - transfer directly
-                        modified_state[name] = param.clone().detach()
-                        transferred_layers.append(name)
-                        total_transferred_params += param.numel()
-                        log(f"Transferred: {name} {param.shape}")
-                    else:
-                        # Incompatible shape - skip
-                        skipped_layers.append(f"{name}: {param.shape} -> {current_state[name].shape}")
-                        log(f"Skipping {name}: shape mismatch {param.shape} vs {current_state[name].shape}")
+                if name in current_state and param.shape == current_state[name].shape:
+                    modified_state[name] = param.clone().detach()
+                    transferred_layers.append(name)
+                    log(f"✅ Transferred: {name} {param.shape}")
                 else:
-                    skipped_layers.append(f"{name}: not found in target model")
-                    log(f"Skipping {name}: not found in target model")
-            
-            # Load the modified state dict
-            self.model.load_state_dict(modified_state)
+                    skipped_layers.append(name)
 
-            # Reinitialize embeddings for new dataset (but keep them trainable if not frozen)
-            log("Reinitializing embeddings for new dataset...")
+            # Load into model (strict=False ignores missing keys)
+            missing, unexpected = self.model.load_state_dict(modified_state, strict=False)
+            log(f"✅  {len(transferred_layers)} layers transferred, {len(skipped_layers)} skipped")
+
+            # Reinitialize new embeddings
             with torch.no_grad():
-                nn.init.xavier_uniform_(self.model.uEmbeds)
-                nn.init.xavier_uniform_(self.model.iEmbeds)
-            
-            # Reset any cached data structures in the handler
+                nn.init.xavier_uniform_(self.model.uEmbeds.weight)
+                nn.init.xavier_uniform_(self.model.iEmbeds.weight)
+            log("🔄 Embeddings reinitialized for new dataset")
+
+            # Rebuild all graph/mask caches
             self.handler.reset_cache_for_transfer()
-            
-            # Get the updated model state with new embeddings
-            updated_state_dict = self.model.state_dict()
-            
-            # Create filtered state dict for distill model
-            filtered_state = {k: v for k, v in updated_state_dict.items() if k not in ['uEmbeds', 'iEmbeds']}
-            
-            # Re-create distill model with correct dimensions
-            log("Re-creating distill model with correct dimensions...")
-            self.distill_model = Model(self.ResidualGTLayer).cuda()
-            
-            # Load filtered state to distill model (without embeddings)
-            self.distill_model.load_state_dict(filtered_state, strict=False)
-            
-            # Initialize distill model's embeddings separately
-            with torch.no_grad():
-                nn.init.xavier_uniform_(self.distill_model.uEmbeds)
-                nn.init.xavier_uniform_(self.distill_model.iEmbeds)
 
-            log(f"Transfer learning completed:")
-            log(f"Transferred layers: {len(transferred_layers)}")
-            log(f"Transferred parameters: {total_transferred_params:,}")
-            log(f"Skipped layers: {len(skipped_layers)}")
-            log(f"Target dataset: {args.data}")
-            log(f"Embeddings reinitialized for dataset: {args.data}")
-            
-            # Show transferred layers summary
-            if transferred_layers:
-                log("Successfully transferred:")
-                for layer in transferred_layers[:10]:  # Show first 10 to avoid too much output
-                    log(f"  • {layer}")
-                if len(transferred_layers) > 10:
-                    log(f"  ... and {len(transferred_layers) - 10} more")
-            
+            # Recreate distill model
+            self.distill_model = Model(self.ResidualGTLayer).cuda()
+            # Load everything except embeddings
+            filtered = {k: v for k, v in self.model.state_dict().items()
+                        if not (k.startswith('uEmbeds.') or k.startswith('iEmbeds.'))}
+            self.distill_model.load_state_dict(filtered, strict=False)
+            with torch.no_grad():
+                nn.init.xavier_uniform_(self.distill_model.uEmbeds.weight)
+                nn.init.xavier_uniform_(self.distill_model.iEmbeds.weight)
+            log("🔄 Distill model rebuilt and synced")
+
             return True
-            
+
         except Exception as e:
             log(f'Error in transfer learning: {e}')
-            import traceback
-            traceback.print_exc()
             return False
+
             
     def reset_cache_for_transfer(self):
         """Reset all cached data structures when transferring between datasets of different dimensions"""
