@@ -694,12 +694,22 @@ class Coach:
             traceback.print_exc()
             return False
             
-    def reset_cached_data_for_transfer(self):
-        """Reset any cached data structures in the handler for transfer learning"""
-        # Reset handler's cached data structures if needed
-        if hasattr(self.handler, 'reset_cache_for_transfer'):
-            self.handler.reset_cache_for_transfer()
-            log("Handler cache reset for new dataset dimensions")
+    def reset_cache_for_transfer(self):
+        """Reset all cached data structures when transferring between datasets of different dimensions"""
+        # Reset anchor set related caches
+        for attr in ['anchorset_id', 'dists_array', 'anchor_adj', 'pnn_cache']:
+            if hasattr(self, attr):
+                delattr(self, attr)
+
+        log("🔄 Rebuilding adjacency matrix for new dimensions...")
+
+        # Always reload training data and rebuild adjacency matrix
+        trnMat = self.loadOneFile(self.trnfile)
+        self.torchBiAdj = self.makeTorchAdj(trnMat)
+        self.allOneAdj = self.makeAllOne(self.torchBiAdj)
+
+        log("🔄 Cached anchor sets reset for new dataset dimensions")
+        self.preSelect_anchor_set()
 
     def makePrint(self, name, ep, reses, save):
         ret = 'Epoch %d/%d, %s: ' % (ep, args.epoch, name)
