@@ -644,15 +644,22 @@ class Coach:
             
             # Load the modified state dict
             self.model.load_state_dict(modified_state)
-            
+
             # Reinitialize embeddings for new dataset (but keep them trainable if not frozen)
             log("🔄 Reinitializing embeddings for new dataset...")
             with torch.no_grad():
                 nn.init.xavier_uniform_(self.model.uEmbeds)
                 nn.init.xavier_uniform_(self.model.iEmbeds)
-            
+
+            # IMPORTANT: Remove embedding keys from modified_state before loading into distill model
+            filtered_state = {k: v for k, v in modified_state.items() if k not in ['uEmbeds', 'iEmbeds']}
+
             # Sync distillation model with the corrected model state
-            self.distill_model.load_state_dict(modified_state, strict=False)
+            self.distill_model.load_state_dict(filtered_state, strict=False)
+
+            # Now manually sync the embeddings between the two models
+            self.distill_model.uEmbeds.data.copy_(self.model.uEmbeds.data)
+            self.distill_model.iEmbeds.data.copy_(self.model.iEmbeds.data)
 
             log(f"✅ Transfer learning completed:")
             log(f"   📊 Transferred layers: {len(transferred_layers)}")
