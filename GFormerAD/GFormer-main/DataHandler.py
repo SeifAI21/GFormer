@@ -50,17 +50,40 @@ class DataHandler:
         dists_dict[node] = nx.single_source_dijkstra_path_length(graph, node, cutoff=cutoff)
       return dists_dict
     def reset_cache_for_transfer(self):
-        """Reset cached data structures when transferring between datasets of different dimensions"""
-        # Reset anchor set related caches - these depend on dataset dimensions
+        """Reset all cached data structures when transferring between datasets of different dimensions"""
+        # Reset anchor set related caches
         if hasattr(self, 'anchorset_id'):
             delattr(self, 'anchorset_id')
         if hasattr(self, 'dists_array'):
             delattr(self, 'dists_array')
         if hasattr(self, 'anchor_adj'):
             delattr(self, 'anchor_adj')
-        
+            
+        # CRITICAL FIX: Reset the adjacency matrix
+        if hasattr(self, 'torchBiAdj'):
+            log("🔄 Rebuilding adjacency matrix for new dimensions...")
+            
+            # Get current dimensions
+            num_users = args.user
+            num_items = args.item
+            log(f"📊 New graph dimensions: users={num_users}, items={num_items}, total={num_users+num_items}")
+            
+            # Rebuild adjacency matrix with correct dimensions
+            user_np, item_np = self.trnMat.nonzero()
+            ratings = self.trnMat.data
+            indices = torch.LongTensor(np.vstack([user_np, item_np + num_users]))
+            values = torch.FloatTensor(ratings)
+            shape = torch.Size([num_users, num_items + num_users])
+            
+            # Create new adjacency matrix with correct dimensions
+            self.torchBiAdj = torch.sparse_coo_tensor(indices, values, shape).cuda()
+            
+        # Reset PNN module caches if they exist
+        if hasattr(self, 'pnn_cache'):
+            delattr(self, 'pnn_cache')
+            
         # Force preselection of anchor set with new dimensions
-        log("Cached anchor sets reset for new dataset dimensions")
+        log("🔄 Cached anchor sets reset for new dataset dimensions")
         self.preSelect_anchor_set()
 
     def get_random_anchorset(self):
