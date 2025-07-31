@@ -651,7 +651,7 @@ class Coach:
                 nn.init.xavier_uniform_(self.model.iEmbeds)
             
             # Reset any cached data structures in the handler
-            self.reset_cached_data_for_transfer()
+            self.handler.reset_cached_data_for_transfer()
             
             # Get the updated model state with new embeddings
             updated_state_dict = self.model.state_dict()
