@@ -59,9 +59,10 @@ class DataHandler:
         if hasattr(self, 'anchor_adj'):
             delattr(self, 'anchor_adj')
         
-    # Force preselection of anchor set with new dimensions
-    log("Cached anchor sets reset for new dataset dimensions")
-    self.preSelect_anchor_set()
+        # Force preselection of anchor set with new dimensions
+        log("Cached anchor sets reset for new dataset dimensions")
+        self.preSelect_anchor_set()
+
     def get_random_anchorset(self):
         n = self.num_nodes
         annchorset_id = np.random.choice(n, size=args.anchor_set_num, replace=False)
