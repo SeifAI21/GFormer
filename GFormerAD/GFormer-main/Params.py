@@ -50,6 +50,18 @@ def ParseArgs():
     parser.add_argument('--auto_save', default=True, action='store_true', help='Enable automatic checkpoint saving')
     parser.add_argument('--save_best_only', default=False, action='store_true', help='Only save checkpoints when performance improves')
     parser.add_argument('--load_weights', type=str, default=None, help='Path to weights file to load')
+    
+    # ===== FINE-TUNING PARAMETERS =====
+    parser.add_argument('--freeze_first_percent', type=float, default=0.0, help='Freeze first X% of layers (0.0-1.0)')
+    parser.add_argument('--freeze_last_percent', type=float, default=0.0, help='Freeze last X% of layers (0.0-1.0)')
+    parser.add_argument('--freeze_embeddings', default=False, action='store_true', help='Freeze embeddings only')
+    parser.add_argument('--freeze_backbone', default=False, action='store_true', help='Freeze GCN and GT layers, train only final layers')
+    parser.add_argument('--progressive_unfreeze', default=False, action='store_true', help='Progressively unfreeze layers during training')
+    parser.add_argument('--unfreeze_schedule', type=str, default='linear', choices=['linear', 'exponential'], help='Schedule for progressive unfreezing')
+    parser.add_argument('--fine_tune_lr', type=float, default=None, help='Different learning rate for fine-tuning (if not set, uses --lr)')
+    parser.add_argument('--frozen_lr_scale', type=float, default=0.1, help='Learning rate scale for frozen->unfrozen layers')
+    
+
     return parser.parse_args()
 
 args = ParseArgs()

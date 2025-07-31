@@ -37,6 +37,293 @@ class Coach:
         self.best_recall = 0.0
         self.best_ndcg = 0.0
         self.start_epoch = 0
+        self.frozen_layers = set()  # Track frozen layers
+        self.layer_freeze_history = []  # Track freezing history
+
+        
+    def get_ordered_parameters(self):
+        """Get model parameters in a logical order for percentage-based freezing"""
+        ordered_params = []
+        
+        # Order: Embeddings -> GCN -> GT -> PNN
+        # 1. Embeddings (usually frozen first in fine-tuning)
+        ordered_params.extend([
+            ('uEmbeds', self.model.uEmbeds),
+            ('iEmbeds', self.model.iEmbeds)
+        ])
+        
+        # 2. GCN Layers (backbone features)
+        for i, layer in enumerate(self.model.gcnLayers):
+            for name, param in layer.named_parameters():
+                ordered_params.append((f'gcnLayers.{i}.{name}', param))
+        
+        # 3. GT Layers (attention mechanism)
+        for name, param in self.model.gtLayers.named_parameters():
+            ordered_params.append((f'gtLayers.{name}', param))
+        
+        # 4. PNN Layers (final prediction layers - usually kept trainable)
+        for i, layer in enumerate(self.model.pnnLayers):
+            for name, param in layer.named_parameters():
+                ordered_params.append((f'pnnLayers.{i}.{name}', param))
+        
+        return ordered_params
+
+    def freeze_first_percent(self, percent):
+        """Freeze the first X% of layers (typically lower-level features)"""
+        if percent <= 0:
+            return 0
+            
+        ordered_params = self.get_ordered_parameters()
+        total_layers = len(ordered_params)
+        freeze_count = int(total_layers * percent)
+        
+        frozen_count = 0
+        log(f"🧊 Freezing first {percent*100:.1f}% of layers ({freeze_count}/{total_layers} layers)")
+        
+        for i in range(freeze_count):
+            if i < len(ordered_params):
+                name, param = ordered_params[i]
+                param.requires_grad = False
+                self.frozen_layers.add(name)
+                frozen_count += 1
+                log(f"   ❄️  Frozen: {name}")
+        
+        return frozen_count
+
+    def freeze_last_percent(self, percent):
+        """Freeze the last X% of layers (typically higher-level features)"""
+        if percent <= 0:
+            return 0
+            
+        ordered_params = self.get_ordered_parameters()
+        total_layers = len(ordered_params)
+        freeze_count = int(total_layers * percent)
+        
+        frozen_count = 0
+        log(f"🧊 Freezing last {percent*100:.1f}% of layers ({freeze_count}/{total_layers} layers)")
+        
+        start_idx = total_layers - freeze_count
+        for i in range(start_idx, total_layers):
+            if i < len(ordered_params):
+                name, param = ordered_params[i]
+                param.requires_grad = False
+                self.frozen_layers.add(name)
+                frozen_count += 1
+                log(f"   ❄️  Frozen: {name}")
+        
+        return frozen_count
+
+    def freeze_backbone_keep_head(self):
+        """Freeze backbone (embeddings + GCN + GT), keep PNN trainable"""
+        frozen_count = 0
+        log("🧊 Freezing backbone layers (Embeddings + GCN + GT), keeping PNN trainable")
+        
+        # Freeze embeddings
+        self.model.uEmbeds.requires_grad = False
+        self.model.iEmbeds.requires_grad = False
+        self.frozen_layers.add('uEmbeds')
+        self.frozen_layers.add('iEmbeds')
+        frozen_count += 2
+        
+        # Freeze GCN layers
+        for name, param in self.model.gcnLayers.named_parameters():
+            param.requires_grad = False
+            full_name = f'gcnLayers.{name}'
+            self.frozen_layers.add(full_name)
+            frozen_count += 1
+            log(f"   ❄️  Frozen: {full_name}")
+        
+        # Freeze GT layers
+        for name, param in self.model.gtLayers.named_parameters():
+            param.requires_grad = False
+            full_name = f'gtLayers.{name}'
+            self.frozen_layers.add(full_name)
+            frozen_count += 1
+            log(f"   ❄️  Frozen: {full_name}")
+        
+        log(f"   ✅ PNN layers kept trainable for task-specific adaptation")
+        return frozen_count
+
+    def progressive_unfreeze_layers(self, current_epoch, total_epochs):
+        """Progressively unfreeze layers during training"""
+        if not args.progressive_unfreeze:
+            return
+        
+        # Calculate unfreezing progress
+        progress = current_epoch / total_epochs
+        
+        if args.unfreeze_schedule == 'linear':
+            unfreeze_ratio = progress
+        elif args.unfreeze_schedule == 'exponential':
+            unfreeze_ratio = progress ** 2
+        else:
+            unfreeze_ratio = progress
+        
+        # Determine which layers to unfreeze
+        ordered_params = self.get_ordered_parameters()
+        total_frozen = len(self.frozen_layers)
+        
+        if total_frozen == 0:
+            return
+        
+        target_unfrozen = int(total_frozen * unfreeze_ratio)
+        current_unfrozen = 0
+        
+        # Unfreeze layers in reverse order (unfreeze higher-level features first)
+        unfrozen_this_step = []
+        for name, param in reversed(ordered_params):
+            if name in self.frozen_layers and current_unfrozen < target_unfrozen:
+                param.requires_grad = True
+                self.frozen_layers.remove(name)
+                unfrozen_this_step.append(name)
+                current_unfrozen += 1
+        
+        if unfrozen_this_step:
+            log(f"🔓 Progressive unfreezing at epoch {current_epoch} ({progress*100:.1f}% progress):")
+            for name in unfrozen_this_step:
+                log(f"   🔥 Unfrozen: {name}")
+            
+            # Update optimizer with new trainable parameters
+            self.update_optimizer_for_unfrozen_layers()
+
+    def update_optimizer_for_unfrozen_layers(self):
+        """Update optimizer when layers are unfrozen during training"""
+        # Get current trainable parameters
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        
+        # Create new optimizer with potentially different learning rate for newly unfrozen layers
+        if args.fine_tune_lr is not None:
+            lr = args.fine_tune_lr
+        else:
+            lr = args.lr
+        
+        # Scale learning rate for newly unfrozen layers
+        lr_scaled = lr * args.frozen_lr_scale
+        
+        self.opt = torch.optim.Adam(trainable_params, lr=lr_scaled, weight_decay=0)
+        log(f"🔄 Optimizer updated with LR={lr_scaled:.6f} for newly unfrozen layers")
+
+    def apply_freezing_strategy(self):
+        """Apply the specified freezing strategy"""
+        total_params = sum(p.numel() for p in self.model.parameters())
+        frozen_count = 0
+        
+        log("=" * 60)
+        log("🧊 APPLYING FREEZING STRATEGY")
+        log("=" * 60)
+        
+        # Strategy 1: Freeze first X% of layers
+        if args.freeze_first_percent > 0:
+            frozen_count += self.freeze_first_percent(args.freeze_first_percent)
+        
+        # Strategy 2: Freeze last X% of layers
+        if args.freeze_last_percent > 0:
+            frozen_count += self.freeze_last_percent(args.freeze_last_percent)
+        
+        # Strategy 3: Freeze embeddings only
+        if args.freeze_embeddings:
+            self.model.uEmbeds.requires_grad = False
+            self.model.iEmbeds.requires_grad = False
+            self.frozen_layers.add('uEmbeds')
+            self.frozen_layers.add('iEmbeds')
+            frozen_count += 2
+            log("❄️  Embeddings frozen")
+        
+        # Strategy 4: Freeze backbone, keep head
+        if args.freeze_backbone:
+            frozen_count += self.freeze_backbone_keep_head()
+        
+        # Calculate statistics
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        frozen_params = total_params - trainable_params
+        
+        log("=" * 60)
+        log("📊 FREEZING SUMMARY")
+        log("=" * 60)
+        log(f"Total parameters: {total_params:,}")
+        log(f"Frozen parameters: {frozen_params:,} ({frozen_params/total_params*100:.2f}%)")
+        log(f"Trainable parameters: {trainable_params:,} ({trainable_params/total_params*100:.2f}%)")
+        log(f"Frozen layers: {len(self.frozen_layers)}")
+        
+        if args.progressive_unfreeze:
+            log(f"🔄 Progressive unfreezing enabled ({args.unfreeze_schedule} schedule)")
+        
+        # Log which components are trainable
+        self.log_component_status()
+        
+        return trainable_params, frozen_params
+
+    def log_component_status(self):
+        """Log the status of each component"""
+        log("🔍 COMPONENT STATUS:")
+        
+        # Check embeddings
+        if self.model.uEmbeds.requires_grad or self.model.iEmbeds.requires_grad:
+            log("   ✅ Embeddings: Trainable")
+        else:
+            log("   ❄️  Embeddings: Frozen")
+        
+        # Check GCN layers
+        gcn_trainable = any(p.requires_grad for p in self.model.gcnLayers.parameters())
+        if gcn_trainable:
+            trainable_gcn = sum(1 for p in self.model.gcnLayers.parameters() if p.requires_grad)
+            total_gcn = sum(1 for p in self.model.gcnLayers.parameters())
+            log(f"   ✅ GCN Layers: {trainable_gcn}/{total_gcn} trainable")
+        else:
+            log("   ❄️  GCN Layers: Frozen")
+        
+        # Check GT layers
+        gt_trainable = any(p.requires_grad for p in self.model.gtLayers.parameters())
+        if gt_trainable:
+            trainable_gt = sum(1 for p in self.model.gtLayers.parameters() if p.requires_grad)
+            total_gt = sum(1 for p in self.model.gtLayers.parameters())
+            log(f"   ✅ GT Layers: {trainable_gt}/{total_gt} trainable")
+        else:
+            log("   ❄️  GT Layers: Frozen")
+        
+        # Check PNN layers
+        pnn_trainable = any(p.requires_grad for p in self.model.pnnLayers.parameters())
+        if pnn_trainable:
+            trainable_pnn = sum(1 for p in self.model.pnnLayers.parameters() if p.requires_grad)
+            total_pnn = sum(1 for p in self.model.pnnLayers.parameters())
+            log(f"   ✅ PNN Layers: {trainable_pnn}/{total_pnn} trainable")
+        else:
+            log("   ❄️  PNN Layers: Frozen")
+
+    def setup_fine_tuning_optimizer(self):
+        """Setup optimizer for fine-tuning with appropriate learning rates"""
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        
+        if args.fine_tune_lr is not None:
+            lr = args.fine_tune_lr
+            log(f"📈 Using fine-tuning learning rate: {lr}")
+        else:
+            lr = args.lr
+            log(f"📈 Using standard learning rate: {lr}")
+        
+        self.opt = torch.optim.Adam(trainable_params, lr=lr, weight_decay=0)
+        
+        log(f"✅ Optimizer created with {len(trainable_params):,} trainable parameters")
+
+    def prepareModel(self):
+        self.gtLayer = GTLayer().cuda()
+        self.model = Model(self.ResidualGTLayer).cuda()
+        self.distill_model = Model(self.ResidualGTLayer).cuda()
+        
+        # Apply freezing strategy BEFORE creating optimizer
+        if (args.freeze_first_percent > 0 or args.freeze_last_percent > 0 or 
+            args.freeze_embeddings or args.freeze_backbone):
+            self.apply_freezing_strategy()
+        
+        # Setup optimizer after freezing
+        self.setup_fine_tuning_optimizer()
+        
+        self.masker = RandomMaskSubgraphs(args.user, args.item)
+        self.sampler = LocalGraph(self.gtLayer)
+
+    
+  
+
 
     def create_checkpoint_dirs(self):
         """Create checkpoint directories if they don't exist"""
@@ -338,6 +625,15 @@ class Coach:
             checkpoint_loaded = self.load_model_weights(args.load_weights)
             if checkpoint_loaded:
                 log('Model weights loaded successfully')
+
+                # Reapply freezing after loading weights
+
+                if (args.freeze_first_percent > 0 or args.freeze_last_percent > 0 or 
+                    args.freeze_embeddings or args.freeze_backbone):
+                    log("🔄 Reapplying freezing strategy after weight loading...")
+                    self.apply_freezing_strategy()
+                    self.setup_fine_tuning_optimizer()
+
                 # Set evaluation mode for weights-only loading
                 if args.epoch == 0:
                     self.model.eval()
@@ -408,15 +704,97 @@ class Coach:
             torch.save([reses], f"Evaluation_result_{args.data}.pkl")
             log('Evaluation completed and results saved')
             
-            # FIXED: Print best results for evaluation-only mode
+            # Print best results for evaluation-only mode
             if bestRes is not None:
                 log(self.makePrint('Best Result', 0, bestRes, True))
             
             return
         
-        # Rest of the training loop remains the same...
+        # Rest of the training loop 
+        # for ep in range(self.start_epoch, args.epoch):
+        #     # Set models to training mode
+        #     self.model.train()
+        #     self.distill_model.train()
+            
+        #     tstFlag = (ep % args.tstEpoch == 0)
+        #     reses = self.trainEpoch()
+        #     log(self.makePrint('Train', ep, reses, tstFlag))
+            
+        #     if tstFlag:
+        #         # Set models to evaluation mode for validation/testing
+        #         self.model.eval()
+        #         self.distill_model.eval()
+                
+        #         reses = self.valEpoch()
+        #         log(self.makePrint('Validation', ep, reses, tstFlag))
+        
+        #         reses = self.testEpoch()
+        #         log(self.makePrint('Test', ep, reses, tstFlag))
+                
+        #         # Check if this is the best model
+        #         is_best = reses['Recall'] > self.best_recall
+        #         if is_best:
+        #             self.best_recall = reses['Recall']
+        #             self.best_ndcg = reses['NDCG']
+        #             bestRes = reses
+                
+        #         # Save checkpoint based on save_freq parameter
+        #         if hasattr(args, 'save_freq') and (ep % args.save_freq == 0 or is_best):
+        #             self.save_checkpoint(ep, is_best=is_best)
+        #         else:
+        #             # Default behavior - save every test epoch
+        #             self.save_checkpoint(ep, is_best=is_best)
+                
+        #         # Save model weights based on save_weights_freq parameter
+        #         if hasattr(args, 'save_weights_freq') and (ep % args.save_weights_freq == 0):
+        #             self.save_model_weights(ep)
+        #         elif ep % (args.tstEpoch * 2) == 0:
+        #             # Default behavior
+        #             self.save_model_weights(ep)
+                
+        #         self.saveHistory()
+        #         result.append(reses)
+                
+        #         if bestRes is None:
+        #             bestRes = reses
+            
+        #     # Save checkpoint every save_freq epochs (not just test epochs)
+        #     elif hasattr(args, 'save_freq') and (ep % args.save_freq == 0):
+        #         self.save_checkpoint(ep, is_best=False)
+        #     elif ep % 10 == 0:
+        #         # Default behavior
+        #         self.save_checkpoint(ep, is_best=False)
+            
+        #     print()
+        
+        # # Final evaluation and save (only for training mode)
+        # if args.epoch > 0:
+        #     # Set models to evaluation mode for final test
+        #     self.model.eval()
+        #     self.distill_model.eval()
+            
+        #     reses = self.testEpoch()
+        #     result.append(reses)
+            
+        #     # Save final checkpoint and results
+        #     self.save_checkpoint(args.epoch - 1, is_final=True)
+        #     torch.save(result, "Saeg_result.pkl")
+            
+        #     log(self.makePrint('Test', args.epoch, reses, True))
+            
+        #     # FIXED: Only print best results if bestRes exists
+        #     if bestRes is not None:
+        #         log(self.makePrint('Best Result', args.epoch, bestRes, True))
+        #     else:
+        #         log('No best result available (training was too short)')
+            
+            # self.saveHistory()
+
+
+
         for ep in range(self.start_epoch, args.epoch):
-            # Set models to training mode
+            self.current_epoch = ep  # Track current epoch for progressive unfreezing
+            
             self.model.train()
             self.distill_model.train()
             
@@ -425,7 +803,6 @@ class Coach:
             log(self.makePrint('Train', ep, reses, tstFlag))
             
             if tstFlag:
-                # Set models to evaluation mode for validation/testing
                 self.model.eval()
                 self.distill_model.eval()
                 
@@ -435,25 +812,20 @@ class Coach:
                 reses = self.testEpoch()
                 log(self.makePrint('Test', ep, reses, tstFlag))
                 
-                # Check if this is the best model
                 is_best = reses['Recall'] > self.best_recall
                 if is_best:
                     self.best_recall = reses['Recall']
                     self.best_ndcg = reses['NDCG']
                     bestRes = reses
                 
-                # Save checkpoint based on save_freq parameter
                 if hasattr(args, 'save_freq') and (ep % args.save_freq == 0 or is_best):
                     self.save_checkpoint(ep, is_best=is_best)
                 else:
-                    # Default behavior - save every test epoch
                     self.save_checkpoint(ep, is_best=is_best)
                 
-                # Save model weights based on save_weights_freq parameter
                 if hasattr(args, 'save_weights_freq') and (ep % args.save_weights_freq == 0):
                     self.save_model_weights(ep)
                 elif ep % (args.tstEpoch * 2) == 0:
-                    # Default behavior
                     self.save_model_weights(ep)
                 
                 self.saveHistory()
@@ -462,31 +834,25 @@ class Coach:
                 if bestRes is None:
                     bestRes = reses
             
-            # Save checkpoint every save_freq epochs (not just test epochs)
             elif hasattr(args, 'save_freq') and (ep % args.save_freq == 0):
                 self.save_checkpoint(ep, is_best=False)
             elif ep % 10 == 0:
-                # Default behavior
                 self.save_checkpoint(ep, is_best=False)
             
             print()
         
-        # Final evaluation and save (only for training mode)
         if args.epoch > 0:
-            # Set models to evaluation mode for final test
             self.model.eval()
             self.distill_model.eval()
             
             reses = self.testEpoch()
             result.append(reses)
             
-            # Save final checkpoint and results
             self.save_checkpoint(args.epoch - 1, is_final=True)
             torch.save(result, "Saeg_result.pkl")
             
             log(self.makePrint('Test', args.epoch, reses, True))
             
-            # FIXED: Only print best results if bestRes exists
             if bestRes is not None:
                 log(self.makePrint('Best Result', args.epoch, bestRes, True))
             else:
@@ -494,15 +860,18 @@ class Coach:
             
             self.saveHistory()
 
-    def prepareModel(self):
-        self.gtLayer = GTLayer().cuda()
-        self.model = Model(self.ResidualGTLayer).cuda()
-        self.distill_model = Model(self.ResidualGTLayer).cuda()
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
-        self.masker = RandomMaskSubgraphs(args.user, args.item)
-        self.sampler = LocalGraph(self.gtLayer)
+
+    # def prepareModel(self):
+    #     self.gtLayer = GTLayer().cuda()
+    #     self.model = Model(self.ResidualGTLayer).cuda()
+    #     self.distill_model = Model(self.ResidualGTLayer).cuda()
+    #     self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
+    #     self.masker = RandomMaskSubgraphs(args.user, args.item)
+    #     self.sampler = LocalGraph(self.gtLayer)
 
     def trainEpoch(self):
+        if hasattr(self, 'current_epoch') and args.progressive_unfreeze:
+            self.progressive_unfreeze_layers(self.current_epoch, args.epoch)
         trnLoader = self.handler.trnLoader
         trnLoader.dataset.negSampling()
         epLoss, epPreLoss = 0, 0
