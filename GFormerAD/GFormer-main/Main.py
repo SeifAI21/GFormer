@@ -652,11 +652,20 @@ class Coach:
                 nn.init.xavier_uniform_(self.model.iEmbeds)
 
             # CRITICAL FIX: Re-create the distill model with the correct dimensions
+            # CRITICAL FIX: Re-create the distill model with the correct dimensions
             log("🔄 Re-creating distill model with correct dimensions...")
             self.distill_model = Model(self.ResidualGTLayer).cuda()
-            
-            # Now sync the entire model state - this will have correct dimensions for everything
-            self.distill_model.load_state_dict(self.model.state_dict())
+
+            # FIXED: Create filtered state dict without embedding keys
+            filtered_state = {k: v for k, v in modified_state.items() if k not in ['uEmbeds', 'iEmbeds']}
+
+            # Use strict=False to skip missing keys (embeddings)
+            self.distill_model.load_state_dict(filtered_state, strict=False)
+
+            # Now manually copy the correctly sized embeddings from main model
+            with torch.no_grad():
+                self.distill_model.uEmbeds.copy_(self.model.uEmbeds)
+                self.distill_model.iEmbeds.copy_(self.model.iEmbeds)
 
             log(f"✅ Transfer learning completed:")
             log(f"   📊 Transferred layers: {len(transferred_layers)}")
