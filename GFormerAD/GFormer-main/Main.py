@@ -650,16 +650,27 @@ class Coach:
             with torch.no_grad():
                 nn.init.xavier_uniform_(self.model.uEmbeds)
                 nn.init.xavier_uniform_(self.model.iEmbeds)
-
-            # Create a new state dict from the current model's state
-            new_state_dict = self.model.state_dict()
             
-            # Re-create the distill model with the correct dimensions
+            # Reset any cached data structures in the handler
+            self.reset_cached_data_for_transfer()
+            
+            # Get the updated model state with new embeddings
+            updated_state_dict = self.model.state_dict()
+            
+            # Create filtered state dict for distill model
+            filtered_state = {k: v for k, v in updated_state_dict.items() if k not in ['uEmbeds', 'iEmbeds']}
+            
+            # Re-create distill model with correct dimensions
             log("Re-creating distill model with correct dimensions...")
             self.distill_model = Model(self.ResidualGTLayer).cuda()
             
-            # Load the new state dict to the distill model
-            self.distill_model.load_state_dict(new_state_dict)
+            # Load filtered state to distill model (without embeddings)
+            self.distill_model.load_state_dict(filtered_state, strict=False)
+            
+            # Initialize distill model's embeddings separately
+            with torch.no_grad():
+                nn.init.xavier_uniform_(self.distill_model.uEmbeds)
+                nn.init.xavier_uniform_(self.distill_model.iEmbeds)
 
             log(f"Transfer learning completed:")
             log(f"Transferred layers: {len(transferred_layers)}")
