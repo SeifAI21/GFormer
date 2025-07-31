@@ -416,7 +416,7 @@ class Coach:
             return False
         
         try:
-            # FIXED: Use weights_only=False to allow numpy objects and other pickle data
+            # Use weights_only=False to allow numpy objects and other pickle data
             checkpoint = torch.load(checkpoint_path, 
                                 map_location='cuda' if torch.cuda.is_available() else 'cpu',
                                 weights_only=False)
@@ -426,7 +426,7 @@ class Coach:
             self.distill_model.load_state_dict(checkpoint['distill_model_state_dict'])
             self.gtLayer.load_state_dict(checkpoint['gtLayer_state_dict'])
             
-            # FIXED: Only load optimizer if we're training (epoch > 0)
+            # Only load optimizer if we're training (epoch > 0)
             if args.epoch > 0:
                 self.opt.load_state_dict(checkpoint['optimizer_state_dict'])
                 log('Optimizer state loaded for training')
@@ -444,7 +444,7 @@ class Coach:
             log(f'Best Recall in checkpoint: {self.best_recall:.4f}')
             log(f'Best NDCG in checkpoint: {self.best_ndcg:.4f}')
             
-            # FIXED: Set appropriate mode based on whether we're training or evaluating
+            # Set appropriate mode based on whether we're training or evaluating
             if args.epoch == 0:
                 self.model.eval()
                 self.distill_model.eval()
@@ -543,7 +543,7 @@ class Coach:
             try:
                 return self.load_legacy_model(weights_path)
             except Exception as e2:
-                log(f'Alternative loading also failed: {e2}')
+                log(f'Legacy loading also failed: {e2}')
                 return False
 
     def load_legacy_model(self, weights_path):
@@ -574,13 +574,13 @@ class Coach:
             return False
 
     def load_model_weights_for_transfer(self, weights_path):
-        """FIXED: Load weights for transfer learning, handling dataset size mismatches"""
+        """Load weights for transfer learning, handling dataset size mismatches"""
         if not os.path.exists(weights_path):
             log(f'Weights file not found: {weights_path}')
             return False
         
         try:
-            log(f'🔄 Loading weights for transfer learning: {weights_path}')
+            log(f'Loading weights for transfer learning: {weights_path}')
             
             # Determine file extension
             file_ext = weights_path.split('.')[-1].lower()
@@ -594,18 +594,18 @@ class Coach:
             if file_ext == 'mod' and 'model' in weights:
                 source_model = weights['model']
                 source_state = source_model.state_dict()
-                log('✅ Extracted state dict from .mod file')
+                log('Extracted state dict from .mod file')
             elif 'model_state_dict' in weights:
                 source_state = weights['model_state_dict']
-                log('✅ Using model_state_dict from checkpoint')
+                log('Using model_state_dict from checkpoint')
             elif 'model' in weights and hasattr(weights['model'], 'state_dict'):
                 source_state = weights['model'].state_dict()
-                log('✅ Extracted state dict from nested model')
+                log('Extracted state dict from nested model')
             else:
                 source_state = weights
-                log('✅ Using direct state dict')
+                log('Using direct state dict')
             
-            # Get current model state - MAKE A COPY TO MODIFY
+            # Get current model state
             current_state = self.model.state_dict()
             modified_state = {}
             
@@ -623,7 +623,7 @@ class Coach:
                 # Skip embeddings due to different dataset sizes
                 if name in ['uEmbeds', 'iEmbeds']:
                     skipped_layers.append(f"{name}: Different dataset size")
-                    log(f"   ⚠️  Skipping {name}: Dataset size mismatch")
+                    log(f"Skipping {name}: Dataset size mismatch")
                     # Keep the current model's embeddings (already in modified_state)
                     continue
                 
@@ -633,60 +633,63 @@ class Coach:
                         modified_state[name] = param.clone().detach()
                         transferred_layers.append(name)
                         total_transferred_params += param.numel()
-                        log(f"   ✅ Transferred: {name} {param.shape}")
+                        log(f"Transferred: {name} {param.shape}")
                     else:
                         # Incompatible shape - skip
                         skipped_layers.append(f"{name}: {param.shape} -> {current_state[name].shape}")
-                        log(f"   ⚠️  Skipping {name}: shape mismatch {param.shape} vs {current_state[name].shape}")
+                        log(f"Skipping {name}: shape mismatch {param.shape} vs {current_state[name].shape}")
                 else:
                     skipped_layers.append(f"{name}: not found in target model")
-                    log(f"   ⚠️  Skipping {name}: not found in target model")
+                    log(f"Skipping {name}: not found in target model")
             
             # Load the modified state dict
             self.model.load_state_dict(modified_state)
 
             # Reinitialize embeddings for new dataset (but keep them trainable if not frozen)
-            log("🔄 Reinitializing embeddings for new dataset...")
+            log("Reinitializing embeddings for new dataset...")
             with torch.no_grad():
                 nn.init.xavier_uniform_(self.model.uEmbeds)
                 nn.init.xavier_uniform_(self.model.iEmbeds)
 
-            # CRITICAL FIX: Re-create the distill model with the correct dimensions
-            # CRITICAL FIX: Re-create the distill model with the correct dimensions
-            log("🔄 Re-creating distill model with correct dimensions...")
+            # Create a new state dict from the current model's state
+            new_state_dict = self.model.state_dict()
+            
+            # Re-create the distill model with the correct dimensions
+            log("Re-creating distill model with correct dimensions...")
             self.distill_model = Model(self.ResidualGTLayer).cuda()
+            
+            # Load the new state dict to the distill model
+            self.distill_model.load_state_dict(new_state_dict)
 
-            # FIXED: Create filtered state dict without embedding keys
-            filtered_state = {k: v for k, v in modified_state.items() if k not in ['uEmbeds', 'iEmbeds']}
-
-            # Use strict=False to skip missing keys (embeddings)
-            self.distill_model.load_state_dict(filtered_state, strict=False)
-
-            # Now manually copy the correctly sized embeddings from main model
-            with torch.no_grad():
-                self.distill_model.uEmbeds.copy_(self.model.uEmbeds)
-                self.distill_model.iEmbeds.copy_(self.model.iEmbeds)
-
-            log(f"✅ Transfer learning completed:")
-            log(f"   📊 Transferred layers: {len(transferred_layers)}")
-            log(f"   📊 Transferred parameters: {total_transferred_params:,}")
-            log(f"   📊 Skipped layers: {len(skipped_layers)}")
-            log(f"   🎯 Target dataset: {args.data}")
-            log(f"   🎯 Embeddings reinitialized for dataset: {args.data}")
+            log(f"Transfer learning completed:")
+            log(f"Transferred layers: {len(transferred_layers)}")
+            log(f"Transferred parameters: {total_transferred_params:,}")
+            log(f"Skipped layers: {len(skipped_layers)}")
+            log(f"Target dataset: {args.data}")
+            log(f"Embeddings reinitialized for dataset: {args.data}")
             
             # Show transferred layers summary
             if transferred_layers:
-                log("   📋 Successfully transferred:")
-                for layer in transferred_layers:
-                    log(f"      • {layer}")
+                log("Successfully transferred:")
+                for layer in transferred_layers[:10]:  # Show first 10 to avoid too much output
+                    log(f"  • {layer}")
+                if len(transferred_layers) > 10:
+                    log(f"  ... and {len(transferred_layers) - 10} more")
             
             return True
             
         except Exception as e:
-            log(f'❌ Error in transfer learning: {e}')
+            log(f'Error in transfer learning: {e}')
             import traceback
             traceback.print_exc()
             return False
+            
+    def reset_cached_data_for_transfer(self):
+        """Reset any cached data structures in the handler for transfer learning"""
+        # Reset handler's cached data structures if needed
+        if hasattr(self.handler, 'reset_cache_for_transfer'):
+            self.handler.reset_cache_for_transfer()
+            log("Handler cache reset for new dataset dimensions")
 
     def makePrint(self, name, ep, reses, save):
         ret = 'Epoch %d/%d, %s: ' % (ep, args.epoch, name)
@@ -711,18 +714,18 @@ class Coach:
             
             # If regular loading fails due to size mismatch, try transfer learning
             if not checkpoint_loaded:
-                log('🔄 Regular weight loading failed, attempting transfer learning...')
+                log('Regular weight loading failed, attempting transfer learning...')
                 checkpoint_loaded = self.load_model_weights_for_transfer(args.load_weights)
                 
                 if checkpoint_loaded:
-                    log('✅ Transfer learning completed successfully')
+                    log('Transfer learning completed successfully')
                     
                     # Reapply freezing after transfer learning
                     if (hasattr(args, 'freeze_first_percent') and args.freeze_first_percent > 0) or \
                        (hasattr(args, 'freeze_last_percent') and args.freeze_last_percent > 0) or \
                        (hasattr(args, 'freeze_embeddings') and args.freeze_embeddings) or \
                        (hasattr(args, 'freeze_backbone') and args.freeze_backbone):
-                        log("🔄 Reapplying freezing strategy after transfer learning...")
+                        log("Reapplying freezing strategy after transfer learning...")
                         self.apply_freezing_strategy()
                         self.setup_fine_tuning_optimizer()
                         
@@ -737,7 +740,7 @@ class Coach:
                     self.distill_model.train()
                     log('Models set to training mode for fine-tuning')
             else:
-                log('❌ Failed to load model weights (both regular and transfer learning)')
+                log('Failed to load model weights (both regular and transfer learning)')
 
         elif hasattr(args, 'load_checkpoint') and args.load_checkpoint:
             # Load specific checkpoint file
@@ -808,7 +811,7 @@ class Coach:
             return
         
         # Training loop
-        log(f"🚀 Starting training for {args.epoch} epochs...")
+        log(f"Starting training for {args.epoch} epochs...")
         
         for ep in range(self.start_epoch, args.epoch):
             # Set models to training mode
@@ -821,7 +824,7 @@ class Coach:
                 reses = self.trainEpoch()
                 log(self.makePrint('Train', ep, reses, tstFlag))
             except Exception as e:
-                log(f"❌ Training error at epoch {ep}: {e}")
+                log(f"Training error at epoch {ep}: {e}")
                 import traceback
                 traceback.print_exc()
                 break
@@ -864,7 +867,7 @@ class Coach:
                         bestRes = reses
                         
                 except Exception as e:
-                    log(f"❌ Testing error at epoch {ep}: {e}")
+                    log(f"Testing error at epoch {ep}: {e}")
                     import traceback
                     traceback.print_exc()
             
@@ -898,7 +901,7 @@ class Coach:
                 self.saveHistory()
                 
             except Exception as e:
-                log(f"❌ Final evaluation error: {e}")
+                log(f"Final evaluation error: {e}")
                 import traceback
                 traceback.print_exc()
 
@@ -920,7 +923,7 @@ class Coach:
             poss = poss.long().cuda()
             negs = negs.long().cuda()
 
-            # Générez les cibles de distillation
+            # Generate distillation targets
             with torch.no_grad():
                 distill_usrEmbeds, distill_itmEmbeds, distill_cList, distill_subLst = self.distill_model(
                     self.handler, False, sub, cmp, encoderAdj, decoderAdj)
@@ -946,16 +949,16 @@ class Coach:
                 usrEmbeds,
                 itmEmbeds) + args.ctra * contrastNCE(ancs, subLst, cList)
 
-            # Calculez les pertes de distillation
+            # Calculate distillation losses
             distill_loss_usr = F.mse_loss(usrEmbeds, distill_usrEmbeds)
             distill_loss_itm = F.mse_loss(itmEmbeds, distill_itmEmbeds)
             distill_loss_cList = F.mse_loss(cList, distill_cList)
             distill_loss_subLst = F.mse_loss(subLst, distill_subLst)
 
-            # Combiner les pertes de distillation
+            # Combine distillation losses
             distill_loss = (distill_loss_usr + distill_loss_itm + distill_loss_cList + distill_loss_subLst) * self.distill_weight
 
-            # Utilisez la perte de distillation pour la mise à jour du modèle
+            # Use distillation loss for model update
             loss = bprLoss + regLoss + contrastLoss + args.b2 * bprLoss2 + distill_loss
             epLoss += loss.item()
             epPreLoss += bprLoss.item()
@@ -966,7 +969,7 @@ class Coach:
             log('Step %d/%d: loss = %.3f, regLoss = %.3f, clLoss = %.3f        ' % (
                 i, steps, loss, regLoss, contrastLoss), save=False, oneline=True)
 
-        # Mettez à jour le modèle de distillation
+        # Update the distillation model
         self.distill_model.load_state_dict(self.model.state_dict())
 
         ret = dict()
@@ -1024,7 +1027,7 @@ class Coach:
         return ret
             
     def testEpoch(self):
-        # FIXED: Ensure model is in evaluation mode
+        # Ensure model is in evaluation mode
         self.model.eval()
         self.distill_model.eval()
         
@@ -1087,7 +1090,7 @@ class Coach:
         log('Model Saved: %s' % args.save_path)
 
     def loadModel(self):
-        # FIXED: Add weights_only=False for legacy model loading
+        # Add weights_only=False for legacy model loading
         ckp = torch.load('Models/' + args.load_model + '.mod', weights_only=False)
         self.model = ckp['model']
         self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
