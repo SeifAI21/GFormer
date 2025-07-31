@@ -49,7 +49,19 @@ class DataHandler:
         # Using Dijkstra's method with cutoff
         dists_dict[node] = nx.single_source_dijkstra_path_length(graph, node, cutoff=cutoff)
       return dists_dict
-
+    def reset_cache_for_transfer(self):
+        """Reset cached data structures when transferring between datasets of different dimensions"""
+        # Reset anchor set related caches - these depend on dataset dimensions
+        if hasattr(self, 'anchorset_id'):
+            delattr(self, 'anchorset_id')
+        if hasattr(self, 'dists_array'):
+            delattr(self, 'dists_array')
+        if hasattr(self, 'anchor_adj'):
+            delattr(self, 'anchor_adj')
+        
+    # Force preselection of anchor set with new dimensions
+    log("Cached anchor sets reset for new dataset dimensions")
+    self.preSelect_anchor_set()
     def get_random_anchorset(self):
         n = self.num_nodes
         annchorset_id = np.random.choice(n, size=args.anchor_set_num, replace=False)
