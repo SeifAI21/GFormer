@@ -68,15 +68,10 @@ class DataHandler:
             num_items = args.item
             log(f"📊 New graph dimensions: users={num_users}, items={num_items}, total={num_users+num_items}")
             
-            # Rebuild adjacency matrix with correct dimensions
-            user_np, item_np = self.trnMat.nonzero()
-            ratings = self.trnMat.data
-            indices = torch.LongTensor(np.vstack([user_np, item_np + num_users]))
-            values = torch.FloatTensor(ratings)
-            shape = torch.Size([num_users, num_items + num_users])
-            
-            # Create new adjacency matrix with correct dimensions
-            self.torchBiAdj = torch.sparse_coo_tensor(indices, values, shape).cuda()
+            # Reload training data to rebuild adjacency matrix
+            trnMat = self.loadOneFile(self.trnfile)
+            self.torchBiAdj = self.makeTorchAdj(trnMat)
+            self.allOneAdj = self.makeAllOne(self.torchBiAdj)
             
         # Reset PNN module caches if they exist
         if hasattr(self, 'pnn_cache'):
