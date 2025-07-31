@@ -574,7 +574,7 @@ class Coach:
             return False
 
     def load_model_weights_for_transfer(self, weights_path):
-        """Load weights for transfer learning, handling dataset size mismatches"""
+        """FIXED: Load weights for transfer learning, handling dataset size mismatches"""
         if not os.path.exists(weights_path):
             log(f'Weights file not found: {weights_path}')
             return False
@@ -605,25 +605,32 @@ class Coach:
                 source_state = weights
                 log('✅ Using direct state dict')
             
-            # Get current model state
+            # Get current model state - MAKE A COPY TO MODIFY
             current_state = self.model.state_dict()
+            modified_state = {}
             
             # Transfer compatible layers only
             transferred_layers = []
             skipped_layers = []
             total_transferred_params = 0
             
+            # First, copy all current model parameters to modified_state
+            for name, param in current_state.items():
+                modified_state[name] = param.clone()
+            
+            # Then, selectively transfer compatible weights from source
             for name, param in source_state.items():
                 # Skip embeddings due to different dataset sizes
                 if name in ['uEmbeds', 'iEmbeds']:
                     skipped_layers.append(f"{name}: Different dataset size")
-                    log(f"   ⚠️  Skipping {name}: Dataset size mismatch ({param.shape} vs {current_state[name].shape})")
+                    log(f"   ⚠️  Skipping {name}: Dataset size mismatch")
+                    # Keep the current model's embeddings (already in modified_state)
                     continue
                 
                 if name in current_state:
                     if param.shape == current_state[name].shape:
                         # Compatible shape - transfer directly
-                        current_state[name] = param.clone().detach()
+                        modified_state[name] = param.clone().detach()
                         transferred_layers.append(name)
                         total_transferred_params += param.numel()
                         log(f"   ✅ Transferred: {name} {param.shape}")
@@ -636,7 +643,7 @@ class Coach:
                     log(f"   ⚠️  Skipping {name}: not found in target model")
             
             # Load the modified state dict
-            self.model.load_state_dict(current_state)
+            self.model.load_state_dict(modified_state)
             
             # Reinitialize embeddings for new dataset (but keep them trainable if not frozen)
             log("🔄 Reinitializing embeddings for new dataset...")
@@ -644,7 +651,7 @@ class Coach:
                 nn.init.xavier_uniform_(self.model.uEmbeds)
                 nn.init.xavier_uniform_(self.model.iEmbeds)
             
-            # Sync distillation model
+            # Sync distillation model with the corrected model state
             self.distill_model.load_state_dict(self.model.state_dict())
             
             log(f"✅ Transfer learning completed:")
@@ -652,19 +659,13 @@ class Coach:
             log(f"   📊 Transferred parameters: {total_transferred_params:,}")
             log(f"   📊 Skipped layers: {len(skipped_layers)}")
             log(f"   🎯 Target dataset: {args.data}")
+            log(f"   🎯 Embeddings reinitialized for dataset: {args.data}")
             
-            # Show transferred layers (first 10 to avoid clutter)
+            # Show transferred layers summary
             if transferred_layers:
-                log("   📋 Key transferred components:")
-                shown_components = set()
-                for layer in transferred_layers[:15]:  # Show first 15
-                    component = layer.split('.')[0] if '.' in layer else layer
-                    if component not in shown_components:
-                        log(f"      • {component}")
-                        shown_components.add(component)
-                
-                if len(transferred_layers) > 15:
-                    log(f"      ... and {len(transferred_layers) - 15} more layers")
+                log("   📋 Successfully transferred:")
+                for layer in transferred_layers:
+                    log(f"      • {layer}")
             
             return True
             
