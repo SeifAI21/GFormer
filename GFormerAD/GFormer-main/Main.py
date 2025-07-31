@@ -618,14 +618,13 @@ class Coach:
             for name, param in current_state.items():
                 modified_state[name] = param.clone()
             
-            # Then, selectively transfer compatible weights from source
             for name, param in source_state.items():
-                # Skip embeddings due to different dataset sizes
-                if name in ['uEmbeds', 'iEmbeds']:
-                    skipped_layers.append(f"{name}: Different dataset size")
-                    log(f"Skipping {name}: Dataset size mismatch")
-                    # Keep the current model's embeddings (already in modified_state)
+                # skip any key that starts with the embedding module
+                if name.startswith('uEmbeds') or name.startswith('iEmbeds'):
+                    log(f"Skipping {name}: dataset size mismatch")
+                    skipped_layers.append(name)
                     continue
+
                 
                 if name in current_state:
                     if param.shape == current_state[name].shape:
