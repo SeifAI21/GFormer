@@ -40,7 +40,6 @@ class Coach:
         self.frozen_layers = set()  # Track frozen layers
         self.layer_freeze_history = []  # Track freezing history
 
-        
     def get_ordered_parameters(self):
         """Get model parameters in a logical order for percentage-based freezing"""
         ordered_params = []
@@ -198,7 +197,10 @@ class Coach:
             lr = args.lr
         
         # Scale learning rate for newly unfrozen layers
-        lr_scaled = lr * args.frozen_lr_scale
+        if hasattr(args, 'frozen_lr_scale'):
+            lr_scaled = lr * args.frozen_lr_scale
+        else:
+            lr_scaled = lr
         
         self.opt = torch.optim.Adam(trainable_params, lr=lr_scaled, weight_decay=0)
         log(f"🔄 Optimizer updated with LR={lr_scaled:.6f} for newly unfrozen layers")
@@ -245,8 +247,8 @@ class Coach:
         log(f"Trainable parameters: {trainable_params:,} ({trainable_params/total_params*100:.2f}%)")
         log(f"Frozen layers: {len(self.frozen_layers)}")
         
-        if args.progressive_unfreeze:
-            log(f"🔄 Progressive unfreezing enabled ({args.unfreeze_schedule} schedule)")
+        if hasattr(args, 'progressive_unfreeze') and args.progressive_unfreeze:
+            log(f"🔄 Progressive unfreezing enabled ({getattr(args, 'unfreeze_schedule', 'linear')} schedule)")
         
         # Log which components are trainable
         self.log_component_status()
@@ -294,7 +296,7 @@ class Coach:
         """Setup optimizer for fine-tuning with appropriate learning rates"""
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         
-        if args.fine_tune_lr is not None:
+        if hasattr(args, 'fine_tune_lr') and args.fine_tune_lr is not None:
             lr = args.fine_tune_lr
             log(f"📈 Using fine-tuning learning rate: {lr}")
         else:
@@ -311,8 +313,10 @@ class Coach:
         self.distill_model = Model(self.ResidualGTLayer).cuda()
         
         # Apply freezing strategy BEFORE creating optimizer
-        if (args.freeze_first_percent > 0 or args.freeze_last_percent > 0 or 
-            args.freeze_embeddings or args.freeze_backbone):
+        if (hasattr(args, 'freeze_first_percent') and args.freeze_first_percent > 0) or \
+           (hasattr(args, 'freeze_last_percent') and args.freeze_last_percent > 0) or \
+           (hasattr(args, 'freeze_embeddings') and args.freeze_embeddings) or \
+           (hasattr(args, 'freeze_backbone') and args.freeze_backbone):
             self.apply_freezing_strategy()
         
         # Setup optimizer after freezing
@@ -320,10 +324,6 @@ class Coach:
         
         self.masker = RandomMaskSubgraphs(args.user, args.item)
         self.sampler = LocalGraph(self.gtLayer)
-
-    
-  
-
 
     def create_checkpoint_dirs(self):
         """Create checkpoint directories if they don't exist"""
@@ -472,36 +472,6 @@ class Coach:
         torch.save(weights, weights_path)
         log(f'Model weights saved: {weights_path}')
 
-    # def load_model_weights(self, weights_path):
-    #     """Enhanced model weights loading for evaluation"""
-    #     if not os.path.exists(weights_path):
-    #         log(f'Weights file not found: {weights_path}')
-    #         return False
-        
-    #     try:
-    #         weights = torch.load(weights_path, 
-    #                         map_location='cuda' if torch.cuda.is_available() else 'cpu',
-    #                         weights_only=False)
-            
-    #         # Load main model weights
-    #         if 'model_state_dict' in weights:
-    #             self.model.load_state_dict(weights['model_state_dict'])
-    #             log('Main model weights loaded')
-    #         else:
-    #             # Legacy format - weights directly stored
-    #             self.model.load_state_dict(weights)
-    #             log('Main model weights loaded (legacy format)')
-            
-    #         # Copy to distillation model for consistency
-    #         self.distill_model.load_state_dict(self.model.state_dict())
-    #         log('Distillation model synchronized with main model')
-            
-    #         log(f'Model weights loaded successfully: {weights_path}')
-    #         return True
-            
-    #     except Exception as e:
-    #         log(f'Error loading weights: {e}')
-    #         return False
     def load_model_weights(self, weights_path):
         """Enhanced model weights loading for evaluation"""
         if not os.path.exists(weights_path):
@@ -603,6 +573,107 @@ class Coach:
             log(f'Legacy loading failed: {e}')
             return False
 
+    def load_model_weights_for_transfer(self, weights_path):
+        """Load weights for transfer learning, handling dataset size mismatches"""
+        if not os.path.exists(weights_path):
+            log(f'Weights file not found: {weights_path}')
+            return False
+        
+        try:
+            log(f'🔄 Loading weights for transfer learning: {weights_path}')
+            
+            # Determine file extension
+            file_ext = weights_path.split('.')[-1].lower()
+            log(f'Loading weights file with extension: .{file_ext}')
+            
+            weights = torch.load(weights_path, 
+                            map_location='cuda' if torch.cuda.is_available() else 'cpu',
+                            weights_only=False)
+            
+            # Extract source model state
+            if file_ext == 'mod' and 'model' in weights:
+                source_model = weights['model']
+                source_state = source_model.state_dict()
+                log('✅ Extracted state dict from .mod file')
+            elif 'model_state_dict' in weights:
+                source_state = weights['model_state_dict']
+                log('✅ Using model_state_dict from checkpoint')
+            elif 'model' in weights and hasattr(weights['model'], 'state_dict'):
+                source_state = weights['model'].state_dict()
+                log('✅ Extracted state dict from nested model')
+            else:
+                source_state = weights
+                log('✅ Using direct state dict')
+            
+            # Get current model state
+            current_state = self.model.state_dict()
+            
+            # Transfer compatible layers only
+            transferred_layers = []
+            skipped_layers = []
+            total_transferred_params = 0
+            
+            for name, param in source_state.items():
+                # Skip embeddings due to different dataset sizes
+                if name in ['uEmbeds', 'iEmbeds']:
+                    skipped_layers.append(f"{name}: Different dataset size")
+                    log(f"   ⚠️  Skipping {name}: Dataset size mismatch ({param.shape} vs {current_state[name].shape})")
+                    continue
+                
+                if name in current_state:
+                    if param.shape == current_state[name].shape:
+                        # Compatible shape - transfer directly
+                        current_state[name] = param.clone().detach()
+                        transferred_layers.append(name)
+                        total_transferred_params += param.numel()
+                        log(f"   ✅ Transferred: {name} {param.shape}")
+                    else:
+                        # Incompatible shape - skip
+                        skipped_layers.append(f"{name}: {param.shape} -> {current_state[name].shape}")
+                        log(f"   ⚠️  Skipping {name}: shape mismatch {param.shape} vs {current_state[name].shape}")
+                else:
+                    skipped_layers.append(f"{name}: not found in target model")
+                    log(f"   ⚠️  Skipping {name}: not found in target model")
+            
+            # Load the modified state dict
+            self.model.load_state_dict(current_state)
+            
+            # Reinitialize embeddings for new dataset (but keep them trainable if not frozen)
+            log("🔄 Reinitializing embeddings for new dataset...")
+            with torch.no_grad():
+                nn.init.xavier_uniform_(self.model.uEmbeds)
+                nn.init.xavier_uniform_(self.model.iEmbeds)
+            
+            # Sync distillation model
+            self.distill_model.load_state_dict(self.model.state_dict())
+            
+            log(f"✅ Transfer learning completed:")
+            log(f"   📊 Transferred layers: {len(transferred_layers)}")
+            log(f"   📊 Transferred parameters: {total_transferred_params:,}")
+            log(f"   📊 Skipped layers: {len(skipped_layers)}")
+            log(f"   🎯 Target dataset: {args.data}")
+            
+            # Show transferred layers (first 10 to avoid clutter)
+            if transferred_layers:
+                log("   📋 Key transferred components:")
+                shown_components = set()
+                for layer in transferred_layers[:15]:  # Show first 15
+                    component = layer.split('.')[0] if '.' in layer else layer
+                    if component not in shown_components:
+                        log(f"      • {component}")
+                        shown_components.add(component)
+                
+                if len(transferred_layers) > 15:
+                    log(f"      ... and {len(transferred_layers) - 15} more layers")
+            
+            return True
+            
+        except Exception as e:
+            log(f'❌ Error in transfer learning: {e}')
+            import traceback
+            traceback.print_exc()
+            return False
+
     def makePrint(self, name, ep, reses, save):
         ret = 'Epoch %d/%d, %s: ' % (ep, args.epoch, name)
         for metric in reses:
@@ -618,32 +689,43 @@ class Coach:
         self.prepareModel()
         log('Model Prepared')
         
-        # FIXED: Updated checkpoint loading logic to handle new parameters
         checkpoint_loaded = False
 
         if hasattr(args, 'load_weights') and args.load_weights:
+            # First try regular loading
             checkpoint_loaded = self.load_model_weights(args.load_weights)
+            
+            # If regular loading fails due to size mismatch, try transfer learning
+            if not checkpoint_loaded:
+                log('🔄 Regular weight loading failed, attempting transfer learning...')
+                checkpoint_loaded = self.load_model_weights_for_transfer(args.load_weights)
+                
+                if checkpoint_loaded:
+                    log('✅ Transfer learning completed successfully')
+                    
+                    # Reapply freezing after transfer learning
+                    if (hasattr(args, 'freeze_first_percent') and args.freeze_first_percent > 0) or \
+                       (hasattr(args, 'freeze_last_percent') and args.freeze_last_percent > 0) or \
+                       (hasattr(args, 'freeze_embeddings') and args.freeze_embeddings) or \
+                       (hasattr(args, 'freeze_backbone') and args.freeze_backbone):
+                        log("🔄 Reapplying freezing strategy after transfer learning...")
+                        self.apply_freezing_strategy()
+                        self.setup_fine_tuning_optimizer()
+                        
             if checkpoint_loaded:
-                log('Model weights loaded successfully')
-
-                # Reapply freezing after loading weights
-
-                if (args.freeze_first_percent > 0 or args.freeze_last_percent > 0 or 
-                    args.freeze_embeddings or args.freeze_backbone):
-                    log("🔄 Reapplying freezing strategy after weight loading...")
-                    self.apply_freezing_strategy()
-                    self.setup_fine_tuning_optimizer()
-
-                # Set evaluation mode for weights-only loading
+                # Set appropriate mode
                 if args.epoch == 0:
                     self.model.eval()
                     self.distill_model.eval()
                     log('Models set to evaluation mode')
+                else:
+                    self.model.train()
+                    self.distill_model.train()
+                    log('Models set to training mode for fine-tuning')
             else:
-                log('Failed to load model weights')
-        
+                log('❌ Failed to load model weights (both regular and transfer learning)')
+
         elif hasattr(args, 'load_checkpoint') and args.load_checkpoint:
-        
             # Load specific checkpoint file
             checkpoint_loaded = self.load_checkpoint(args.load_checkpoint)
             if checkpoint_loaded:
@@ -669,24 +751,27 @@ class Coach:
                 log('No checkpoint found, starting fresh')
         
         elif args.load_model != None:
-            # Legacy model loading
-            self.loadModel()
-            checkpoint_loaded = True
-            log('Legacy model loaded successfully')
+            try:
+                # Legacy model loading
+                self.loadModel()
+                checkpoint_loaded = True
+                log('Legacy model loaded successfully')
+            except Exception as e:
+                log(f'Legacy model loading failed: {e}')
+                checkpoint_loaded = False
         
         else:
-            log('Model Initialized')
+            log('Model Initialized from scratch')
         
         bestRes = None
         result = []
         
-        # FIXED: Handle evaluation-only mode (epoch=0) with better error handling
+        # Handle evaluation-only mode (epoch=0)
         if args.epoch == 0:
             log('Evaluation-only mode (epoch=0)')
             if not checkpoint_loaded:
                 log('ERROR: No checkpoint loaded for evaluation!')
                 log('Please provide a valid checkpoint path using --load_checkpoint')
-                log('Example: --load_checkpoint /path/to/your/checkpoint.pth')
                 return
             
             # Set models to evaluation mode
@@ -697,109 +782,114 @@ class Coach:
             reses = self.testEpoch()
             log(self.makePrint('Evaluation', 0, reses, True))
             
-            # FIXED: Set bestRes for evaluation-only mode
             bestRes = reses
             
             # Save evaluation results
             torch.save([reses], f"Evaluation_result_{args.data}.pkl")
             log('Evaluation completed and results saved')
             
-            # Print best results for evaluation-only mode
             if bestRes is not None:
                 log(self.makePrint('Best Result', 0, bestRes, True))
             
             return
         
-        # Rest of the training loop 
+        # Training loop
+        log(f"🚀 Starting training for {args.epoch} epochs...")
+        
         for ep in range(self.start_epoch, args.epoch):
             # Set models to training mode
             self.model.train()
             self.distill_model.train()
             
             tstFlag = (ep % args.tstEpoch == 0)
-            reses = self.trainEpoch()
-            log(self.makePrint('Train', ep, reses, tstFlag))
+            
+            try:
+                reses = self.trainEpoch()
+                log(self.makePrint('Train', ep, reses, tstFlag))
+            except Exception as e:
+                log(f"❌ Training error at epoch {ep}: {e}")
+                import traceback
+                traceback.print_exc()
+                break
             
             if tstFlag:
-                # Set models to evaluation mode for validation/testing
+                # Set models to evaluation mode for testing
                 self.model.eval()
                 self.distill_model.eval()
                 
-                reses = self.valEpoch()
-                log(self.makePrint('Validation', ep, reses, tstFlag))
-        
-                reses = self.testEpoch()
-                log(self.makePrint('Test', ep, reses, tstFlag))
-                
-                # Check if this is the best model
-                is_best = reses['Recall'] > self.best_recall
-                if is_best:
-                    self.best_recall = reses['Recall']
-                    self.best_ndcg = reses['NDCG']
-                    bestRes = reses
-                
-                # Save checkpoint based on save_freq parameter
-                if hasattr(args, 'save_freq') and (ep % args.save_freq == 0 or is_best):
-                    self.save_checkpoint(ep, is_best=is_best)
-                else:
-                    # Default behavior - save every test epoch
-                    self.save_checkpoint(ep, is_best=is_best)
-                
-                # Save model weights based on save_weights_freq parameter
-                if hasattr(args, 'save_weights_freq') and (ep % args.save_weights_freq == 0):
-                    self.save_model_weights(ep)
-                elif ep % (args.tstEpoch * 2) == 0:
-                    # Default behavior
-                    self.save_model_weights(ep)
-                
-                self.saveHistory()
-                result.append(reses)
-                
-                if bestRes is None:
-                    bestRes = reses
+                try:
+                    reses = self.valEpoch()
+                    log(self.makePrint('Validation', ep, reses, tstFlag))
             
-            # Save checkpoint every save_freq epochs (not just test epochs)
+                    reses = self.testEpoch()
+                    log(self.makePrint('Test', ep, reses, tstFlag))
+                    
+                    # Check if this is the best model
+                    is_best = reses['Recall'] > self.best_recall
+                    if is_best:
+                        self.best_recall = reses['Recall']
+                        self.best_ndcg = reses['NDCG']
+                        bestRes = reses
+                    
+                    # Save checkpoint
+                    if hasattr(args, 'save_freq') and (ep % args.save_freq == 0 or is_best):
+                        self.save_checkpoint(ep, is_best=is_best)
+                    else:
+                        self.save_checkpoint(ep, is_best=is_best)
+                    
+                    # Save weights
+                    if hasattr(args, 'save_weights_freq') and (ep % args.save_weights_freq == 0):
+                        self.save_model_weights(ep)
+                    elif ep % (args.tstEpoch * 2) == 0:
+                        self.save_model_weights(ep)
+                    
+                    self.saveHistory()
+                    result.append(reses)
+                    
+                    if bestRes is None:
+                        bestRes = reses
+                        
+                except Exception as e:
+                    log(f"❌ Testing error at epoch {ep}: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # Save checkpoint every save_freq epochs
             elif hasattr(args, 'save_freq') and (ep % args.save_freq == 0):
                 self.save_checkpoint(ep, is_best=False)
             elif ep % 10 == 0:
-                # Default behavior
                 self.save_checkpoint(ep, is_best=False)
             
             print()
         
-        # Final evaluation and save (only for training mode)
+        # Final evaluation and save
         if args.epoch > 0:
-            # Set models to evaluation mode for final test
-            self.model.eval()
-            self.distill_model.eval()
-            
-            reses = self.testEpoch()
-            result.append(reses)
-            
-            # Save final checkpoint and results
-            self.save_checkpoint(args.epoch - 1, is_final=True)
-            torch.save(result, "Saeg_result.pkl")
-            
-            log(self.makePrint('Test', args.epoch, reses, True))
-            
-            # FIXED: Only print best results if bestRes exists
-            if bestRes is not None:
-                log(self.makePrint('Best Result', args.epoch, bestRes, True))
-            else:
-                log('No best result available (training was too short)')
-            
-            self.saveHistory()
-
-    # def prepareModel(self):
-    #     self.gtLayer = GTLayer().cuda()
-    #     self.model = Model(self.ResidualGTLayer).cuda()
-    #     self.distill_model = Model(self.ResidualGTLayer).cuda()
-    #     self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
-    #     self.masker = RandomMaskSubgraphs(args.user, args.item)
-    #     self.sampler = LocalGraph(self.gtLayer)
+            try:
+                self.model.eval()
+                self.distill_model.eval()
+                
+                reses = self.testEpoch()
+                result.append(reses)
+                
+                self.save_checkpoint(args.epoch - 1, is_final=True)
+                torch.save(result, f"Transfer_result_{args.data}.pkl")
+                
+                log(self.makePrint('Final Test', args.epoch, reses, True))
+                
+                if bestRes is not None:
+                    log(self.makePrint('Best Result', args.epoch, bestRes, True))
+                else:
+                    log('No best result available')
+                
+                self.saveHistory()
+                
+            except Exception as e:
+                log(f"❌ Final evaluation error: {e}")
+                import traceback
+                traceback.print_exc()
 
     def trainEpoch(self):
-        if hasattr(self, 'current_epoch') and args.progressive_unfreeze:
+        if hasattr(self, 'current_epoch') and hasattr(args, 'progressive_unfreeze') and args.progressive_unfreeze:
             self.progressive_unfreeze_layers(self.current_epoch, args.epoch)
         trnLoader = self.handler.trnLoader
         trnLoader.dataset.negSampling()
