@@ -652,7 +652,7 @@ class Coach:
                 nn.init.xavier_uniform_(self.model.iEmbeds)
             
             # Sync distillation model with the corrected model state
-            self.distill_model.load_state_dict(self.model.state_dict(), strict=False)
+            self.distill_model.load_state_dict(modified_state, strict=False)
 
             log(f"✅ Transfer learning completed:")
             log(f"   📊 Transferred layers: {len(transferred_layers)}")
