@@ -623,6 +623,8 @@ class Coach:
 
             # Rebuild all graph/mask caches
             self.handler.reset_cache_for_transfer()
+            self.sampler   = LocalGraph(self.gtLayer)
+            self.masker    = RandomMaskSubgraphs(args.user, args.item)
 
             # Recreate distill model
             self.distill_model = Model(self.ResidualGTLayer).cuda()
