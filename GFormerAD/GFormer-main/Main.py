@@ -585,8 +585,8 @@ class Coach:
             
             # Load checkpoint
             ckpt = torch.load(weights_path,
-                            map_location='cuda' if torch.cuda.is_available() else 'cpu',
-                            weights_only=False)
+                        map_location='cuda' if torch.cuda.is_available() else 'cpu',
+                        weights_only=False)
             
             # Extract source state dict
             if 'model_state_dict' in ckpt:
@@ -643,20 +643,59 @@ class Coach:
                 except Exception as e:
                     log(f"Error reinitializing embeddings: {e}")
             
-            # CRITICAL: Reset cache in handler to rebuild graph
+            # CRITICAL: Check if torchBiAdj exists and log dimensions before reset
+            if hasattr(self.handler, 'torchBiAdj'):
+                log(f"🔍 BEFORE RESET: torchBiAdj shape = {self.handler.torchBiAdj.shape}")
+            else:
+                log("⚠️ torchBiAdj does not exist before reset")
+                
+            # Reset cache in handler to rebuild graph
             log("🔄 Rebuilding graph structures...")
             if hasattr(self.handler, 'reset_cache_for_transfer'):
-                self.handler.reset_cache_for_transfer()
-                
-                # Print dimensions to verify
-                log(f"Adjacency matrix dimensions: {self.handler.torchBiAdj.shape}")
-                log(f"Total nodes: {args.user + args.item}")
+                try:
+                    log("📌 Calling reset_cache_for_transfer...")
+                    self.handler.reset_cache_for_transfer()
+                    log("✅ Cache reset completed")
+                except Exception as e:
+                    log(f"❌ ERROR in cache reset: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return False
+                    
+                # Verify adjacency dimensions immediately after reset
+                if hasattr(self.handler, 'torchBiAdj'):
+                    log(f"🔍 AFTER RESET: torchBiAdj shape = {self.handler.torchBiAdj.shape}")
+                    log(f"Expected dimensions: users={args.user}, items={args.item}, total={args.user+args.item}")
+                    
+                    # Verify dimensions match
+                    expected_dim = args.user + args.item
+                    actual_dim = self.handler.torchBiAdj.shape[0]
+                    if expected_dim != actual_dim:
+                        log(f"❌ CRITICAL ERROR: Adjacency matrix has wrong dimensions after reset!")
+                        log(f"Expected {expected_dim} but got {actual_dim}")
+                        return False
+                else:
+                    log("❌ ERROR: torchBiAdj was not created during reset!")
+                    return False
             else:
                 log("❌ ERROR: Handler has no reset_cache_for_transfer method!")
+                return False
             
-            # Recreate sampler and masker with correct dimensions
-            self.sampler = LocalGraph(self.gtLayer)
-            self.masker = RandomMaskSubgraphs(args.user, args.item)
+            # Recreate all graph-related structures with new dimensions
+            log("🔄 Rebuilding graph components...")
+            try:
+                # Recreate sampler with new dimensions
+                self.sampler = LocalGraph(self.gtLayer)
+                log("✓ LocalGraph sampler recreated")
+                
+                # Recreate masker with new dimensions
+                self.masker = RandomMaskSubgraphs(args.user, args.item)
+                log("✓ RandomMaskSubgraphs recreated")
+            except Exception as e:
+                log(f"❌ ERROR recreating graph components: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
             
             # Recreate distill model with correct dimensions
             self.distill_model = Model(self.ResidualGTLayer).cuda()
@@ -680,6 +719,9 @@ class Coach:
                         nn.init.xavier_uniform_(self.distill_model.iEmbeds)
                 except Exception as e:
                     log(f"Error initializing distill embeddings: {e}")
+                    
+            # Run a final dimension check
+            self.debug_model_dimensions()
             
             log(f"✅ Transfer learning complete: {len(transferred_layers)} layers transferred, {len(skipped_layers)} skipped")
             return True
@@ -835,6 +877,25 @@ class Coach:
                 log(self.makePrint('Best Result', 0, bestRes, True))
             
             return
+
+
+        # Final dimension check before training
+        log("📊 Final dimension check before training...")
+        self.debug_model_dimensions()
+
+        if self.handler.torchBiAdj.shape[0] != args.user + args.item:
+            log("⚠️ CRITICAL: Dimensions still don't match! Forcing final cache reset...")
+            try:
+                self.handler.reset_cache_for_transfer()
+                self.sampler = LocalGraph(self.gtLayer)
+                self.masker = RandomMaskSubgraphs(args.user, args.item)
+                log("✅ Final reset complete")
+                self.debug_model_dimensions()
+            except Exception as e:
+                log(f"❌ ERROR in final reset: {e}")
+                import traceback
+                traceback.print_exc()
+                log("Training will likely fail due to dimension mismatch!")
         
         # Training loop
         log(f"Starting training for {args.epoch} epochs...")

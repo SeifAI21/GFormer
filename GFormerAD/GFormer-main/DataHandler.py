@@ -31,53 +31,65 @@ class DataHandler:
         else:
             raise ValueError(f"Unknown data key: {args.data}")
 
-
         self.predir = predir  # Now always defined
         self.trnfile = os.path.join(predir, 'trnMat.pkl')
         self.valfile = os.path.join(predir, 'valMat.pkl')
         self.tstfile = os.path.join(predir, 'tstMat.pkl')
 
-
-   # def single_source_shortest_path_length_range(self, graph, node_range, cutoff):  # 最短路径算法
-        #dists_dict = {}
-        #for node in node_range:
-         #   dists_dict[node] = nx.single_source_shortest_path_length(graph, node, cutoff=None)
-        #return dists_dict
     def single_source_shortest_path_length_range(self, graph, node_range, cutoff=None):
-      dists_dict = {}
-      for node in node_range:
-        # Using Dijkstra's method with cutoff
-        dists_dict[node] = nx.single_source_dijkstra_path_length(graph, node, cutoff=cutoff)
-      return dists_dict
-    # In DataHandler class, replace reset_cache_for_transfer(...)
+        dists_dict = {}
+        for node in node_range:
+            # Using Dijkstra's method with cutoff
+            dists_dict[node] = nx.single_source_dijkstra_path_length(graph, node, cutoff=cutoff)
+        return dists_dict
+        
     def reset_cache_for_transfer(self):
         """Reset all cached data structures when transferring between datasets of different dimensions"""
         log("🔄 CACHE RESET - STARTING")
-        # Remove old caches
-        for attr in ['anchorset_id', 'dists_array', 'anchor_adj', 'pnn_cache']:
+        
+        # First clear all cache attributes
+        for attr in ['anchorset_id', 'dists_array', 'anchor_adj', 'pnn_cache', 
+                    'torchBiAdj', 'allOneAdj']:  # Added torchBiAdj and allOneAdj to force rebuild
             if hasattr(self, attr):
+                log(f"  🗑️ Deleting {attr}")
                 delattr(self, attr)
-                log(f"  ✓ Cleared {attr}")
-
-        log(f"🔄 Rebuilding adjacency matrix for new dimensions...")
+        
+        log(f"🔄 Rebuilding graph from scratch for dimensions...")
         log(f"  • Current dimensions: users={args.user}, items={args.item}, total={args.user+args.item}")
         
-        # ALWAYS rebuild adjacency matrices for the new dimensions
-        trnMat = self.loadOneFile(self.trnfile)
-        log(f"  ✓ Loaded training matrix with shape {trnMat.shape}")
-        
-        # Rebuild the adjacency matrices with new dimensions
-        self.torchBiAdj = self.makeTorchAdj(trnMat)
-        log(f"  ✓ Built torchBiAdj with shape {self.torchBiAdj.shape}")
-        
-        self.allOneAdj = self.makeAllOne(self.torchBiAdj)
-        log(f"  ✓ Built allOneAdj with shape {self.allOneAdj.shape}")
-        
-        log("🔄 Rebuilding anchor sets...")
-        self.preSelect_anchor_set()
-        log("  ✓ Anchor sets rebuilt")
-        log("🔄 CACHE RESET - COMPLETE")
-
+        # Load the training data from disk to ensure fresh data
+        try:
+            trnMat = self.loadOneFile(self.trnfile)
+            log(f"  ✓ Loaded training matrix with shape {trnMat.shape}")
+            
+            # Force rebuild adjacency matrices with new dimensions
+            log("  🔨 Building torchBiAdj...")
+            self.torchBiAdj = self.makeTorchAdj(trnMat)
+            log(f"  ✓ Built torchBiAdj with shape {self.torchBiAdj.shape}")
+            
+            log("  🔨 Building allOneAdj...")
+            self.allOneAdj = self.makeAllOne(self.torchBiAdj)
+            log(f"  ✓ Built allOneAdj with shape {self.allOneAdj.shape}")
+            
+            log("  🔨 Rebuilding anchor sets...")
+            self.preSelect_anchor_set()
+            log("  ✓ Anchor sets rebuilt")
+            
+            # Verify that dimensions match what we expect
+            expected_dim = args.user + args.item
+            actual_dim = self.torchBiAdj.shape[0]
+            
+            if expected_dim != actual_dim:
+                log(f"⚠️ DIMENSION MISMATCH: Expected {expected_dim} but got {actual_dim}")
+            else:
+                log(f"✅ DIMENSIONS MATCH: {actual_dim} nodes")
+                
+            log("🔄 CACHE RESET - COMPLETE")
+            
+        except Exception as e:
+            log(f"❌ ERROR during cache reset: {e}")
+            import traceback
+            traceback.print_exc()
 
     def get_random_anchorset(self):
         n = self.num_nodes
@@ -124,7 +136,6 @@ class DataHandler:
         return mat.dot(dInvSqrtMat).transpose().dot(dInvSqrtMat).tocoo()
 
     def makeTorchAdj(self, trainMat):
-
         a = sp.csr_matrix((args.user, args.user))
         b = sp.csr_matrix((args.item, args.item))
         mat = sp.vstack([sp.hstack([a, trainMat]), sp.hstack([trainMat.transpose(), b])])
@@ -137,6 +148,7 @@ class DataHandler:
         vals = t.from_numpy(mat.data.astype(np.float32))
         shape = t.Size(mat.shape)
         return torch.sparse_coo_tensor(idxs, vals, shape, dtype=torch.float32).cuda()
+        
     def makeAllOne(self, torchAdj):
         idxs = torchAdj._indices()
         vals = t.ones_like(torchAdj._values())
@@ -180,6 +192,7 @@ class TrnData(data.Dataset):
 
     def __getitem__(self, idx):
         return self.rows[idx], self.cols[idx], self.negs[idx]
+        
 class ValData(data.Dataset):
     def __init__(self, coomat):
         self.rows = coomat.row
