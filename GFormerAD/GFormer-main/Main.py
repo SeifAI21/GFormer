@@ -938,7 +938,12 @@ class Coach:
             
             log("✅ Emergency embedding resize complete")
             self.debug_model_dimensions()
-                
+                # After replacing embeddings, recreate optimizer
+            log("🔄 Recreating optimizer to include new embeddings...")
+            self.opt = torch.optim.Adam(self.model.parameters(), 
+                                    lr=args.fine_tune_lr if hasattr(args, 'fine_tune_lr') else args.lr, 
+                                    weight_decay=0)
+            log("✅ Optimizer updated with new embedding parameters")
         # Training loop
         log(f"Starting training for {args.epoch} epochs...")
         
