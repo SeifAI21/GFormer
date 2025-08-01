@@ -573,7 +573,7 @@ class Coach:
             log(f'Legacy loading failed: {e}')
             return False
 
-# In Coach class, replace load_model_weights_for_transfer(...)
+    # In Coach class, replace load_model_weights_for_transfer(...)
     def load_model_weights_for_transfer(self, weights_path):
         """Load weights for transfer learning, handling dataset size mismatches"""
         if not os.path.exists(weights_path):
@@ -582,10 +582,12 @@ class Coach:
 
         try:
             log(f'Loading weights for transfer learning: {weights_path}')
+            
             # Load checkpoint
             ckpt = torch.load(weights_path,
                             map_location='cuda' if torch.cuda.is_available() else 'cpu',
                             weights_only=False)
+            
             # Extract source state dict
             if 'model_state_dict' in ckpt:
                 source_state = ckpt['model_state_dict']
@@ -594,72 +596,125 @@ class Coach:
             else:
                 source_state = ckpt
 
+            # Print source and target dimensions for debugging
+            log(f"SOURCE MODEL DIMENSIONS: users={source_state['uEmbeds'].shape[0]}, items={source_state['iEmbeds'].shape[0]}")
+            log(f"TARGET MODEL DIMENSIONS: users={args.user}, items={args.item}")
+            
+            # Get current model state
             current_state = self.model.state_dict()
+            
+            # Create a modified state that starts with current model's state
             modified_state = {k: v.clone() for k, v in current_state.items()}
             transferred_layers, skipped_layers = [], []
-
-            # Transfer only compatible weights, skip embeddings
+            
+            # Transfer only compatible layers, explicitly skip embeddings
             for name, param in source_state.items():
-                if name.startswith('uEmbeds.') or name.startswith('iEmbeds.'):
-                    log(f"⚠️  Skipping {name}: dataset size mismatch")
+                # CRITICAL: Skip embeddings due to dimension mismatch
+                if name == 'uEmbeds' or name == 'iEmbeds':
                     skipped_layers.append(name)
+                    log(f"⚠️ Skipping embedding: {name} ({param.shape[0]} vs {modified_state[name].shape[0]})")
                     continue
+                    
                 if name in current_state and param.shape == current_state[name].shape:
                     modified_state[name] = param.clone().detach()
                     transferred_layers.append(name)
                     log(f"✅ Transferred: {name} {param.shape}")
                 else:
                     skipped_layers.append(name)
-
-            # Load into model (strict=False ignores missing keys)
-            missing, unexpected = self.model.load_state_dict(modified_state, strict=False)
-            log(f"✅  {len(transferred_layers)} layers transferred, {len(skipped_layers)} skipped")
-
-            # Reinitialize new embeddings
+                    if name in current_state:
+                        log(f"⚠️ Shape mismatch: {name} {param.shape} vs {current_state[name].shape}")
+                    else:
+                        log(f"⚠️ Missing key: {name}")
+            
+            # Load the modified state into the model
+            self.model.load_state_dict(modified_state, strict=False)
+            
+            # Reinitialize embeddings (fix the weight attribute error)
+            log("🔄 Reinitializing embeddings...")
             with torch.no_grad():
-                nn.init.xavier_uniform_(self.model.uEmbeds.weight)
-                nn.init.xavier_uniform_(self.model.iEmbeds.weight)
-            log("🔄 Embeddings reinitialized for new dataset")
-
-            # Rebuild all graph/mask caches
-            self.handler.reset_cache_for_transfer()
-            self.sampler   = LocalGraph(self.gtLayer)
-            self.masker    = RandomMaskSubgraphs(args.user, args.item)
-
-            # Recreate distill model
+                try:
+                    # Try both ways of accessing embeddings
+                    if hasattr(self.model.uEmbeds, 'weight'):
+                        nn.init.xavier_uniform_(self.model.uEmbeds.weight)
+                        nn.init.xavier_uniform_(self.model.iEmbeds.weight)
+                    else:
+                        nn.init.xavier_uniform_(self.model.uEmbeds)
+                        nn.init.xavier_uniform_(self.model.iEmbeds)
+                except Exception as e:
+                    log(f"Error reinitializing embeddings: {e}")
+            
+            # CRITICAL: Reset cache in handler to rebuild graph
+            log("🔄 Rebuilding graph structures...")
+            if hasattr(self.handler, 'reset_cache_for_transfer'):
+                self.handler.reset_cache_for_transfer()
+                
+                # Print dimensions to verify
+                log(f"Adjacency matrix dimensions: {self.handler.torchBiAdj.shape}")
+                log(f"Total nodes: {args.user + args.item}")
+            else:
+                log("❌ ERROR: Handler has no reset_cache_for_transfer method!")
+            
+            # Recreate sampler and masker with correct dimensions
+            self.sampler = LocalGraph(self.gtLayer)
+            self.masker = RandomMaskSubgraphs(args.user, args.item)
+            
+            # Recreate distill model with correct dimensions
             self.distill_model = Model(self.ResidualGTLayer).cuda()
-            # Load everything except embeddings
-            filtered = {k: v for k, v in self.model.state_dict().items()
-                        if not (k.startswith('uEmbeds.') or k.startswith('iEmbeds.'))}
-            self.distill_model.load_state_dict(filtered, strict=False)
+            
+            # Transfer non-embedding weights to distill model
+            distill_state = {}
+            for name, param in self.model.state_dict().items():
+                if name != 'uEmbeds' and name != 'iEmbeds':
+                    distill_state[name] = param.clone().detach()
+            
+            self.distill_model.load_state_dict(distill_state, strict=False)
+            
+            # Initialize distill model embeddings
             with torch.no_grad():
-                nn.init.xavier_uniform_(self.distill_model.uEmbeds.weight)
-                nn.init.xavier_uniform_(self.distill_model.iEmbeds.weight)
-            log("🔄 Distill model rebuilt and synced")
-
+                try:
+                    if hasattr(self.distill_model.uEmbeds, 'weight'):
+                        nn.init.xavier_uniform_(self.distill_model.uEmbeds.weight)
+                        nn.init.xavier_uniform_(self.distill_model.iEmbeds.weight)
+                    else:
+                        nn.init.xavier_uniform_(self.distill_model.uEmbeds)
+                        nn.init.xavier_uniform_(self.distill_model.iEmbeds)
+                except Exception as e:
+                    log(f"Error initializing distill embeddings: {e}")
+            
+            log(f"✅ Transfer learning complete: {len(transferred_layers)} layers transferred, {len(skipped_layers)} skipped")
             return True
-
+            
         except Exception as e:
             log(f'Error in transfer learning: {e}')
+            import traceback
+            traceback.print_exc()
             return False
 
-            
-    def reset_cache_for_transfer(self):
-        """Reset all cached data structures when transferring between datasets of different dimensions"""
-        # Reset anchor set related caches
-        for attr in ['anchorset_id', 'dists_array', 'anchor_adj', 'pnn_cache']:
-            if hasattr(self, attr):
-                delattr(self, attr)
+    def debug_model_dimensions(self):
+        """Debug function to check dimensions of model and graph structures"""
+        log("=" * 60)
+        log("📏 DIMENSION CHECK")
+        log("=" * 60)
+        log(f"User count: {args.user}")
+        log(f"Item count: {args.item}")
+        log(f"Total nodes: {args.user + args.item}")
+        
+        # Check model dimensions
+        log(f"Model uEmbeds shape: {self.model.uEmbeds.shape}")
+        log(f"Model iEmbeds shape: {self.model.iEmbeds.shape}")
+        
+        # Check graph dimensions
+        log(f"torchBiAdj shape: {self.handler.torchBiAdj.shape}")
+        log(f"allOneAdj shape: {self.handler.allOneAdj.shape}")
+        
+        # Verify match
+        if self.handler.torchBiAdj.shape[0] == args.user + args.item:
+            log("✅ DIMENSIONS MATCH - Training should work!")
+        else:
+            log(f"❌ DIMENSION MISMATCH: Graph has {self.handler.torchBiAdj.shape[0]} nodes but model expects {args.user + args.item}")
+        log("=" * 60)
 
-        log("🔄 Rebuilding adjacency matrix for new dimensions...")
 
-        # Always reload training data and rebuild adjacency matrix
-        trnMat = self.loadOneFile(self.trnfile)
-        self.torchBiAdj = self.makeTorchAdj(trnMat)
-        self.allOneAdj = self.makeAllOne(self.torchBiAdj)
-
-        log("🔄 Cached anchor sets reset for new dataset dimensions")
-        self.preSelect_anchor_set()
 
     def makePrint(self, name, ep, reses, save):
         ret = 'Epoch %d/%d, %s: ' % (ep, args.epoch, name)
@@ -688,6 +743,7 @@ class Coach:
                 checkpoint_loaded = self.load_model_weights_for_transfer(args.load_weights)
                 
                 if checkpoint_loaded:
+                    self.debug_model_dimensions()  # Verify dimensions match
                     log('Transfer learning completed successfully')
                     
                     # Reapply freezing after transfer learning

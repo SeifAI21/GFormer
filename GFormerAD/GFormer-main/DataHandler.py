@@ -51,20 +51,32 @@ class DataHandler:
       return dists_dict
     # In DataHandler class, replace reset_cache_for_transfer(...)
     def reset_cache_for_transfer(self):
-        """Reset all cached data structures when swapping dataset dims."""
+        """Reset all cached data structures when transferring between datasets of different dimensions"""
+        log("🔄 CACHE RESET - STARTING")
         # Remove old caches
         for attr in ['anchorset_id', 'dists_array', 'anchor_adj', 'pnn_cache']:
             if hasattr(self, attr):
                 delattr(self, attr)
+                log(f"  ✓ Cleared {attr}")
 
-        log("🔄 Rebuilding adjacency matrix for new dimensions…")
-        # Reload training matrix and rebuild adjacency
+        log(f"🔄 Rebuilding adjacency matrix for new dimensions...")
+        log(f"  • Current dimensions: users={args.user}, items={args.item}, total={args.user+args.item}")
+        
+        # ALWAYS rebuild adjacency matrices for the new dimensions
         trnMat = self.loadOneFile(self.trnfile)
+        log(f"  ✓ Loaded training matrix with shape {trnMat.shape}")
+        
+        # Rebuild the adjacency matrices with new dimensions
         self.torchBiAdj = self.makeTorchAdj(trnMat)
+        log(f"  ✓ Built torchBiAdj with shape {self.torchBiAdj.shape}")
+        
         self.allOneAdj = self.makeAllOne(self.torchBiAdj)
-
-        log("🔄 Resetting anchor sets for new graph…")
+        log(f"  ✓ Built allOneAdj with shape {self.allOneAdj.shape}")
+        
+        log("🔄 Rebuilding anchor sets...")
         self.preSelect_anchor_set()
+        log("  ✓ Anchor sets rebuilt")
+        log("🔄 CACHE RESET - COMPLETE")
 
 
     def get_random_anchorset(self):
