@@ -573,7 +573,6 @@ class Coach:
             log(f'Legacy loading failed: {e}')
             return False
 
-    # In Coach class, replace load_model_weights_for_transfer(...)
     def load_model_weights_for_transfer(self, weights_path):
         """Load weights for transfer learning, handling dataset size mismatches"""
         if not os.path.exists(weights_path):
@@ -607,12 +606,29 @@ class Coach:
             modified_state = {k: v.clone() for k, v in current_state.items()}
             transferred_layers, skipped_layers = [], []
             
+            # CRITICAL FIX: Create new embeddings with correct dimensions
+            log("🔄 Creating new embeddings with correct dimensions")
+            
+            # Create new user embeddings with correct dimension
+            new_uEmbeds = nn.Parameter(torch.empty(args.user, source_state['uEmbeds'].shape[1]))
+            nn.init.xavier_uniform_(new_uEmbeds)
+            
+            # Create new item embeddings with correct dimension
+            new_iEmbeds = nn.Parameter(torch.empty(args.item, source_state['iEmbeds'].shape[1]))
+            nn.init.xavier_uniform_(new_iEmbeds)
+            
+            # Replace in modified state
+            modified_state['uEmbeds'] = new_uEmbeds
+            modified_state['iEmbeds'] = new_iEmbeds
+            log(f"✅ Created new user embeddings: {new_uEmbeds.shape}")
+            log(f"✅ Created new item embeddings: {new_iEmbeds.shape}")
+            
             # Transfer only compatible layers, explicitly skip embeddings
             for name, param in source_state.items():
-                # CRITICAL: Skip embeddings due to dimension mismatch
+                # Skip embeddings as we've already created new ones
                 if name == 'uEmbeds' or name == 'iEmbeds':
                     skipped_layers.append(name)
-                    log(f"⚠️ Skipping embedding: {name} ({param.shape[0]} vs {modified_state[name].shape[0]})")
+                    log(f"⚠️ Skipping embedding: {name} (using newly created embeddings)")
                     continue
                     
                 if name in current_state and param.shape == current_state[name].shape:
@@ -628,20 +644,6 @@ class Coach:
             
             # Load the modified state into the model
             self.model.load_state_dict(modified_state, strict=False)
-            
-            # Reinitialize embeddings (fix the weight attribute error)
-            log("🔄 Reinitializing embeddings...")
-            with torch.no_grad():
-                try:
-                    # Try both ways of accessing embeddings
-                    if hasattr(self.model.uEmbeds, 'weight'):
-                        nn.init.xavier_uniform_(self.model.uEmbeds.weight)
-                        nn.init.xavier_uniform_(self.model.iEmbeds.weight)
-                    else:
-                        nn.init.xavier_uniform_(self.model.uEmbeds)
-                        nn.init.xavier_uniform_(self.model.iEmbeds)
-                except Exception as e:
-                    log(f"Error reinitializing embeddings: {e}")
             
             # CRITICAL: Check if torchBiAdj exists and log dimensions before reset
             if hasattr(self.handler, 'torchBiAdj'):
@@ -700,25 +702,13 @@ class Coach:
             # Recreate distill model with correct dimensions
             self.distill_model = Model(self.ResidualGTLayer).cuda()
             
-            # Transfer non-embedding weights to distill model
+            # Transfer non-embedding weights to distill model and create new embeddings
             distill_state = {}
             for name, param in self.model.state_dict().items():
-                if name != 'uEmbeds' and name != 'iEmbeds':
-                    distill_state[name] = param.clone().detach()
+                distill_state[name] = param.clone().detach()
             
-            self.distill_model.load_state_dict(distill_state, strict=False)
-            
-            # Initialize distill model embeddings
-            with torch.no_grad():
-                try:
-                    if hasattr(self.distill_model.uEmbeds, 'weight'):
-                        nn.init.xavier_uniform_(self.distill_model.uEmbeds.weight)
-                        nn.init.xavier_uniform_(self.distill_model.iEmbeds.weight)
-                    else:
-                        nn.init.xavier_uniform_(self.distill_model.uEmbeds)
-                        nn.init.xavier_uniform_(self.distill_model.iEmbeds)
-                except Exception as e:
-                    log(f"Error initializing distill embeddings: {e}")
+            self.distill_model.load_state_dict(distill_state)
+            log("✅ Distillation model created with same dimensions as main model")
                     
             # Run a final dimension check
             self.debug_model_dimensions()
@@ -742,18 +732,43 @@ class Coach:
         log(f"Total nodes: {args.user + args.item}")
         
         # Check model dimensions
-        log(f"Model uEmbeds shape: {self.model.uEmbeds.shape}")
-        log(f"Model iEmbeds shape: {self.model.iEmbeds.shape}")
+        if hasattr(self.model, 'uEmbeds'):
+            log(f"Model uEmbeds shape: {self.model.uEmbeds.shape}")
+            if self.model.uEmbeds.shape[0] != args.user:
+                log(f"⚠️ USER EMBEDDING MISMATCH: {self.model.uEmbeds.shape[0]} vs {args.user}")
+        else:
+            log("❌ Model missing uEmbeds!")
+            
+        if hasattr(self.model, 'iEmbeds'):
+            log(f"Model iEmbeds shape: {self.model.iEmbeds.shape}")
+            if self.model.iEmbeds.shape[0] != args.item:
+                log(f"⚠️ ITEM EMBEDDING MISMATCH: {self.model.iEmbeds.shape[0]} vs {args.item}")
+        else:
+            log("❌ Model missing iEmbeds!")
         
         # Check graph dimensions
-        log(f"torchBiAdj shape: {self.handler.torchBiAdj.shape}")
-        log(f"allOneAdj shape: {self.handler.allOneAdj.shape}")
-        
-        # Verify match
-        if self.handler.torchBiAdj.shape[0] == args.user + args.item:
-            log("✅ DIMENSIONS MATCH - Training should work!")
+        if hasattr(self.handler, 'torchBiAdj'):
+            log(f"torchBiAdj shape: {self.handler.torchBiAdj.shape}")
+            if self.handler.torchBiAdj.shape[0] != args.user + args.item:
+                log(f"⚠️ ADJACENCY MISMATCH: {self.handler.torchBiAdj.shape[0]} vs {args.user + args.item}")
         else:
-            log(f"❌ DIMENSION MISMATCH: Graph has {self.handler.torchBiAdj.shape[0]} nodes but model expects {args.user + args.item}")
+            log("❌ Missing torchBiAdj!")
+            
+        if hasattr(self.handler, 'allOneAdj'):
+            log(f"allOneAdj shape: {self.handler.allOneAdj.shape}")
+        else:
+            log("❌ Missing allOneAdj!")
+        
+        # Verify match between embeddings and adjacency matrix
+        if hasattr(self.model, 'uEmbeds') and hasattr(self.model, 'iEmbeds') and hasattr(self.handler, 'torchBiAdj'):
+            total_embed_size = self.model.uEmbeds.shape[0] + self.model.iEmbeds.shape[0]
+            adj_size = self.handler.torchBiAdj.shape[0]
+            
+            if total_embed_size == adj_size:
+                log("✅ DIMENSIONS MATCH - Training should work!")
+            else:
+                log(f"❌ CRITICAL MISMATCH: Embeddings ({total_embed_size}) vs Adjacency ({adj_size})")
+        
         log("=" * 60)
 
 
@@ -897,6 +912,33 @@ class Coach:
                 traceback.print_exc()
                 log("Training will likely fail due to dimension mismatch!")
         
+        # Add embeddings dimension check
+        log("🔍 Performing final embeddings dimension check...")
+        if self.model.uEmbeds.shape[0] != args.user or self.model.iEmbeds.shape[0] != args.item:
+            log("❌ CRITICAL: Embedding dimensions still don't match!")
+            log(f"Expected: users={args.user}, items={args.item}")
+            log(f"Got: users={self.model.uEmbeds.shape[0]}, items={self.model.iEmbeds.shape[0]}")
+            
+            log("🛠️ Attempting emergency embedding resize...")
+            
+            # Create new embedding layers with correct dimensions
+            new_uEmbeds = nn.Parameter(torch.empty(args.user, self.model.uEmbeds.shape[1], device=self.model.uEmbeds.device))
+            nn.init.xavier_uniform_(new_uEmbeds)
+            
+            new_iEmbeds = nn.Parameter(torch.empty(args.item, self.model.iEmbeds.shape[1], device=self.model.iEmbeds.device))
+            nn.init.xavier_uniform_(new_iEmbeds)
+            
+            # Replace embeddings
+            self.model.uEmbeds = new_uEmbeds
+            self.model.iEmbeds = new_iEmbeds
+            
+            # Also fix distill model
+            self.distill_model.uEmbeds = nn.Parameter(new_uEmbeds.clone())
+            self.distill_model.iEmbeds = nn.Parameter(new_iEmbeds.clone())
+            
+            log("✅ Emergency embedding resize complete")
+            self.debug_model_dimensions()
+                
         # Training loop
         log(f"Starting training for {args.epoch} epochs...")
         
