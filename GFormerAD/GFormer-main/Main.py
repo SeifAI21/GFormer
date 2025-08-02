@@ -626,6 +626,24 @@ class Coach:
             # Transfer only compatible layers, explicitly skip embeddings
             for name, param in source_state.items():
                 # Skip embeddings as we've already created new ones
+
+                modified_state['uEmbeds'] = new_uEmbeds
+                modified_state['iEmbeds'] = new_iEmbeds
+                log(f"✅ Created new user embeddings: {new_uEmbeds.shape}")
+                log(f"✅ Created new item embeddings: {new_iEmbeds.shape}")
+
+                # Add this code here:
+                if 'uEmbeds' in self.frozen_layers:
+                    self.frozen_layers.remove('uEmbeds')
+                    log("🔓 Unfreezing user embeddings because they were newly created")
+                    
+                if 'iEmbeds' in self.frozen_layers:
+                    self.frozen_layers.remove('iEmbeds')
+                    log("🔓 Unfreezing item embeddings because they were newly created")
+
+                # Transfer only compatible layers, explicitly skip embeddings
+
+
                 if name == 'uEmbeds' or name == 'iEmbeds':
                     skipped_layers.append(name)
                     log(f"⚠️ Skipping embedding: {name} (using newly created embeddings)")
@@ -839,6 +857,27 @@ class Coach:
             checkpoint_loaded = self.load_checkpoint(load_best=True)
             if checkpoint_loaded:
                 log('Best checkpoint loaded successfully')
+                
+                if (hasattr(args, 'freeze_first_percent') and args.freeze_first_percent > 0) or \
+                (hasattr(args, 'freeze_last_percent') and args.freeze_last_percent > 0) or \
+                (hasattr(args, 'freeze_embeddings') and args.freeze_embeddings) or \
+                (hasattr(args, 'freeze_backbone') and args.freeze_backbone):
+                    log("Reapplying freezing strategy after transfer learning...")
+                    self.apply_freezing_strategy()
+                    self.setup_fine_tuning_optimizer()
+
+                # Add this code here:
+                if 'uEmbeds' in self.frozen_layers:
+                    self.frozen_layers.remove('uEmbeds')
+                    log("🔓 Unfreezing user embeddings because they were newly created")
+                    
+                if 'iEmbeds' in self.frozen_layers:
+                    self.frozen_layers.remove('iEmbeds')
+                    log("🔓 Unfreezing item embeddings because they were newly created")
+
+
+
+
             else:
                 log('No best checkpoint found, starting fresh')
         
