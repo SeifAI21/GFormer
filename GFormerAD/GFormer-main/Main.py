@@ -77,7 +77,7 @@ class Coach:
         freeze_count = int(total_layers * percent)
         
         frozen_count = 0
-        log(f"🧊 Freezing first {percent*100:.1f}% of layers ({freeze_count}/{total_layers} layers)")
+        log(f" Freezing first {percent*100:.1f}% of layers ({freeze_count}/{total_layers} layers)")
         
         for i in range(freeze_count):
             if i < len(ordered_params):
@@ -85,7 +85,7 @@ class Coach:
                 param.requires_grad = False
                 self.frozen_layers.add(name)
                 frozen_count += 1
-                log(f"   ❄️  Frozen: {name}")
+                log(f"     Frozen: {name}")
         
         return frozen_count
 
@@ -99,7 +99,7 @@ class Coach:
         freeze_count = int(total_layers * percent)
         
         frozen_count = 0
-        log(f"🧊 Freezing last {percent*100:.1f}% of layers ({freeze_count}/{total_layers} layers)")
+        log(f"Freezing last {percent*100:.1f}% of layers ({freeze_count}/{total_layers} layers)")
         
         start_idx = total_layers - freeze_count
         for i in range(start_idx, total_layers):
@@ -108,14 +108,14 @@ class Coach:
                 param.requires_grad = False
                 self.frozen_layers.add(name)
                 frozen_count += 1
-                log(f"   ❄️  Frozen: {name}")
+                log(f"     Frozen: {name}")
         
         return frozen_count
 
     def freeze_backbone_keep_head(self):
         """Freeze backbone (embeddings + GCN + GT), keep PNN trainable"""
         frozen_count = 0
-        log("🧊 Freezing backbone layers (Embeddings + GCN + GT), keeping PNN trainable")
+        log(" Freezing backbone layers (Embeddings + GCN + GT), keeping PNN trainable")
         
         # Freeze embeddings
         self.model.uEmbeds.requires_grad = False
@@ -130,7 +130,7 @@ class Coach:
             full_name = f'gcnLayers.{name}'
             self.frozen_layers.add(full_name)
             frozen_count += 1
-            log(f"   ❄️  Frozen: {full_name}")
+            log(f"   Frozen: {full_name}")
         
         # Freeze GT layers
         for name, param in self.model.gtLayers.named_parameters():
@@ -138,9 +138,9 @@ class Coach:
             full_name = f'gtLayers.{name}'
             self.frozen_layers.add(full_name)
             frozen_count += 1
-            log(f"   ❄️  Frozen: {full_name}")
+            log(f"     Frozen: {full_name}")
         
-        log(f"   ✅ PNN layers kept trainable for task-specific adaptation")
+        log(f"    PNN layers kept trainable for task-specific adaptation")
         return frozen_count
 
     def progressive_unfreeze_layers(self, current_epoch, total_epochs):
@@ -178,9 +178,9 @@ class Coach:
                 current_unfrozen += 1
         
         if unfrozen_this_step:
-            log(f"🔓 Progressive unfreezing at epoch {current_epoch} ({progress*100:.1f}% progress):")
+            log(f" Progressive unfreezing at epoch {current_epoch} ({progress*100:.1f}% progress):")
             for name in unfrozen_this_step:
-                log(f"   🔥 Unfrozen: {name}")
+                log(f"   Unfrozen: {name}")
             
             # Update optimizer with new trainable parameters
             self.update_optimizer_for_unfrozen_layers()
@@ -202,7 +202,7 @@ class Coach:
             lr_scaled = lr
         
         self.opt = torch.optim.Adam(trainable_params, lr=lr_scaled, weight_decay=0)
-        log(f"🔄 Optimizer updated with LR={lr_scaled:.6f} for newly unfrozen layers")
+        log(f" Optimizer updated with LR={lr_scaled:.6f} for newly unfrozen layers")
 
     def apply_freezing_strategy(self):
         """Apply the specified freezing strategy"""
@@ -210,7 +210,7 @@ class Coach:
         frozen_count = 0
         
         log("=" * 60)
-        log("🧊 APPLYING FREEZING STRATEGY")
+        log(" APPLYING FREEZING STRATEGY")
         log("=" * 60)
         
         # Strategy 1: Freeze first X% of layers
@@ -228,7 +228,7 @@ class Coach:
             self.frozen_layers.add('uEmbeds')
             self.frozen_layers.add('iEmbeds')
             frozen_count += 2
-            log("❄️  Embeddings frozen")
+            log("Embeddings frozen")
         
         # Strategy 4: Freeze backbone, keep head
         if args.freeze_backbone:
@@ -239,7 +239,7 @@ class Coach:
         frozen_params = total_params - trainable_params
         
         log("=" * 60)
-        log("📊 FREEZING SUMMARY")
+        log(" FREEZING SUMMARY")
         log("=" * 60)
         log(f"Total parameters: {total_params:,}")
         log(f"Frozen parameters: {frozen_params:,} ({frozen_params/total_params*100:.2f}%)")
@@ -247,7 +247,7 @@ class Coach:
         log(f"Frozen layers: {len(self.frozen_layers)}")
         
         if hasattr(args, 'progressive_unfreeze') and args.progressive_unfreeze:
-            log(f"🔄 Progressive unfreezing enabled ({getattr(args, 'unfreeze_schedule', 'linear')} schedule)")
+            log(f"Progressive unfreezing enabled ({getattr(args, 'unfreeze_schedule', 'linear')} schedule)")
         
         # Log which components are trainable
         self.log_component_status()
@@ -260,36 +260,36 @@ class Coach:
         
         # Check embeddings
         if self.model.uEmbeds.requires_grad or self.model.iEmbeds.requires_grad:
-            log("   ✅ Embeddings: Trainable")
+            log("  Embeddings: Trainable")
         else:
-            log("   ❄️  Embeddings: Frozen")
+            log("  Embeddings: Frozen")
         
         # Check GCN layers
         gcn_trainable = any(p.requires_grad for p in self.model.gcnLayers.parameters())
         if gcn_trainable:
             trainable_gcn = sum(1 for p in self.model.gcnLayers.parameters() if p.requires_grad)
             total_gcn = sum(1 for p in self.model.gcnLayers.parameters())
-            log(f"   ✅ GCN Layers: {trainable_gcn}/{total_gcn} trainable")
+            log(f" GCN Layers: {trainable_gcn}/{total_gcn} trainable")
         else:
-            log("   ❄️  GCN Layers: Frozen")
+            log(" GCN Layers: Frozen")
         
         # Check GT layers
         gt_trainable = any(p.requires_grad for p in self.model.gtLayers.parameters())
         if gt_trainable:
             trainable_gt = sum(1 for p in self.model.gtLayers.parameters() if p.requires_grad)
             total_gt = sum(1 for p in self.model.gtLayers.parameters())
-            log(f"   ✅ GT Layers: {trainable_gt}/{total_gt} trainable")
+            log(f"GT Layers: {trainable_gt}/{total_gt} trainable")
         else:
-            log("   ❄️  GT Layers: Frozen")
+            log("GT Layers: Frozen")
         
         # Check PNN layers
         pnn_trainable = any(p.requires_grad for p in self.model.pnnLayers.parameters())
         if pnn_trainable:
             trainable_pnn = sum(1 for p in self.model.pnnLayers.parameters() if p.requires_grad)
             total_pnn = sum(1 for p in self.model.pnnLayers.parameters())
-            log(f"   ✅ PNN Layers: {trainable_pnn}/{total_pnn} trainable")
+            log(f"  PNN Layers: {trainable_pnn}/{total_pnn} trainable")
         else:
-            log("   ❄️  PNN Layers: Frozen")
+            log("   PNN Layers: Frozen")
 
     def setup_fine_tuning_optimizer(self):
         """Setup optimizer for fine-tuning with appropriate learning rates"""
@@ -297,14 +297,14 @@ class Coach:
         
         if hasattr(args, 'fine_tune_lr') and args.fine_tune_lr is not None:
             lr = args.fine_tune_lr
-            log(f"📈 Using fine-tuning learning rate: {lr}")
+            log(f"Using fine-tuning learning rate: {lr}")
         else:
             lr = args.lr
-            log(f"📈 Using standard learning rate: {lr}")
+            log(f"Using standard learning rate: {lr}")
         
         self.opt = torch.optim.Adam(trainable_params, lr=lr, weight_decay=0)
         
-        log(f"✅ Optimizer created with {len(trainable_params):,} trainable parameters")
+        log(f" Optimizer created with {len(trainable_params):,} trainable parameters")
 
     def prepareModel(self):
         self.gtLayer = GTLayer().cuda()
@@ -618,8 +618,8 @@ class Coach:
             # Replace in modified state
             modified_state['uEmbeds'] = new_uEmbeds
             modified_state['iEmbeds'] = new_iEmbeds
-            log(f"✅ Created new user embeddings: {new_uEmbeds.shape}")
-            log(f"✅ Created new item embeddings: {new_iEmbeds.shape}")
+            log(f" Created new user embeddings: {new_uEmbeds.shape}")
+            log(f"Created new item embeddings: {new_iEmbeds.shape}")
             
             # Transfer only compatible layers, explicitly skip embeddings
             for name, param in source_state.items():
@@ -634,7 +634,7 @@ class Coach:
                 if name in current_state and param.shape == current_state[name].shape:
                     modified_state[name] = param.clone().detach()
                     transferred_layers.append(name)
-                    log(f"✅ Transferred: {name} {param.shape}")
+                    log(f" Transferred: {name} {param.shape}")
                 else:
                     skipped_layers.append(name)
                     if name in current_state:
@@ -652,7 +652,7 @@ class Coach:
                 log("⚠️ torchBiAdj does not exist before reset")
                 
             # Reset cache in handler to rebuild graph
-            log("🔄 Rebuilding graph structures...")
+            log(" Rebuilding graph structures...")
             if hasattr(self.handler, 'reset_cache_for_transfer'):
                 try:
                     log("Calling reset_cache_for_transfer...")
@@ -684,7 +684,7 @@ class Coach:
                 return False
             
             # Recreate all graph-related structures with new dimensions
-            log("🔄 Rebuilding graph components...")
+            log(" Rebuilding graph components...")
             try:
                 # Recreate sampler with new dimensions
                 self.sampler = LocalGraph(self.gtLayer)
@@ -895,11 +895,11 @@ class Coach:
 
 
         # Final dimension check before training
-        log("📊 Final dimension check before training...")
+        log("final dimension check before training...")
         self.debug_model_dimensions()
 
         if self.handler.torchBiAdj.shape[0] != args.user + args.item:
-            log("⚠️ CRITICAL: Dimensions still don't match! Forcing final cache reset...")
+            log("CRITICAL: Dimensions still don't match! Forcing final cache reset...")
             try:
                 self.handler.reset_cache_for_transfer()
                 self.sampler = LocalGraph(self.gtLayer)
@@ -913,13 +913,13 @@ class Coach:
                 log("Training will likely fail due to dimension mismatch!")
         
         # Add embeddings dimension check
-        log("🔍 Performing final embeddings dimension check...")
+        log(" Performing final embeddings dimension check...")
         if self.model.uEmbeds.shape[0] != args.user or self.model.iEmbeds.shape[0] != args.item:
             log("CRITICAL: Embedding dimensions still don't match!")
             log(f"Expected: users={args.user}, items={args.item}")
             log(f"Got: users={self.model.uEmbeds.shape[0]}, items={self.model.iEmbeds.shape[0]}")
             
-            log("🛠️ Attempting emergency embedding resize...")
+            log(" Attempting emergency embedding resize...")
             
             # Create new embedding layers with correct dimensions
             new_uEmbeds = nn.Parameter(torch.empty(args.user, self.model.uEmbeds.shape[1], device=self.model.uEmbeds.device))
