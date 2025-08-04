@@ -190,7 +190,6 @@ class Coach:
         # Get current trainable parameters
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         
-        # Create new optimizer with potentially different learning rate for newly unfrozen layers
         if args.fine_tune_lr is not None:
             lr = args.fine_tune_lr
         else:
@@ -606,8 +605,7 @@ class Coach:
             modified_state = {k: v.clone() for k, v in current_state.items()}
             transferred_layers, skipped_layers = [], []
             
-            # CRITICAL FIX: Create new embeddings with correct dimensions
-            log("🔄 Creating new embeddings with correct dimensions")
+            log(" Creating new embeddings with correct dimensions")
             
             # Create new user embeddings with correct dimension
             new_uEmbeds = nn.Parameter(torch.empty(args.user, source_state['uEmbeds'].shape[1]))
@@ -657,11 +655,11 @@ class Coach:
             log("🔄 Rebuilding graph structures...")
             if hasattr(self.handler, 'reset_cache_for_transfer'):
                 try:
-                    log("📌 Calling reset_cache_for_transfer...")
+                    log("Calling reset_cache_for_transfer...")
                     self.handler.reset_cache_for_transfer()
-                    log("✅ Cache reset completed")
+                    log("Cache reset completed")
                 except Exception as e:
-                    log(f"❌ ERROR in cache reset: {e}")
+                    log(f"ERROR in cache reset: {e}")
                     import traceback
                     traceback.print_exc()
                     return False
@@ -675,14 +673,14 @@ class Coach:
                     expected_dim = args.user + args.item
                     actual_dim = self.handler.torchBiAdj.shape[0]
                     if expected_dim != actual_dim:
-                        log(f"❌ CRITICAL ERROR: Adjacency matrix has wrong dimensions after reset!")
+                        log(f" CRITICAL ERROR: Adjacency matrix has wrong dimensions after reset!")
                         log(f"Expected {expected_dim} but got {actual_dim}")
                         return False
                 else:
-                    log("❌ ERROR: torchBiAdj was not created during reset!")
+                    log(" ERROR: torchBiAdj was not created during reset!")
                     return False
             else:
-                log("❌ ERROR: Handler has no reset_cache_for_transfer method!")
+                log(" ERROR: Handler has no reset_cache_for_transfer method!")
                 return False
             
             # Recreate all graph-related structures with new dimensions
@@ -696,7 +694,7 @@ class Coach:
                 self.masker = RandomMaskSubgraphs(args.user, args.item)
                 log("✓ RandomMaskSubgraphs recreated")
             except Exception as e:
-                log(f"❌ ERROR recreating graph components: {e}")
+                log(f" ERROR recreating graph components: {e}")
                 import traceback
                 traceback.print_exc()
                 return False
@@ -710,12 +708,12 @@ class Coach:
                 distill_state[name] = param.clone().detach()
             
             self.distill_model.load_state_dict(distill_state)
-            log("✅ Distillation model created with same dimensions as main model")
+            log(" Distillation model created with same dimensions as main model")
                     
             # Run a final dimension check
             self.debug_model_dimensions()
             
-            log(f"✅ Transfer learning complete: {len(transferred_layers)} layers transferred, {len(skipped_layers)} skipped")
+            log(f"Transfer learning complete: {len(transferred_layers)} layers transferred, {len(skipped_layers)} skipped")
             return True
             
         except Exception as e:
@@ -737,29 +735,29 @@ class Coach:
         if hasattr(self.model, 'uEmbeds'):
             log(f"Model uEmbeds shape: {self.model.uEmbeds.shape}")
             if self.model.uEmbeds.shape[0] != args.user:
-                log(f"⚠️ USER EMBEDDING MISMATCH: {self.model.uEmbeds.shape[0]} vs {args.user}")
+                log(f" USER EMBEDDING MISMATCH: {self.model.uEmbeds.shape[0]} vs {args.user}")
         else:
-            log("❌ Model missing uEmbeds!")
+            log("Model missing uEmbeds!")
             
         if hasattr(self.model, 'iEmbeds'):
             log(f"Model iEmbeds shape: {self.model.iEmbeds.shape}")
             if self.model.iEmbeds.shape[0] != args.item:
-                log(f"⚠️ ITEM EMBEDDING MISMATCH: {self.model.iEmbeds.shape[0]} vs {args.item}")
+                log(f" ITEM EMBEDDING MISMATCH: {self.model.iEmbeds.shape[0]} vs {args.item}")
         else:
-            log("❌ Model missing iEmbeds!")
+            log(" Model missing iEmbeds!")
         
         # Check graph dimensions
         if hasattr(self.handler, 'torchBiAdj'):
             log(f"torchBiAdj shape: {self.handler.torchBiAdj.shape}")
             if self.handler.torchBiAdj.shape[0] != args.user + args.item:
-                log(f"⚠️ ADJACENCY MISMATCH: {self.handler.torchBiAdj.shape[0]} vs {args.user + args.item}")
+                log(f" ADJACENCY MISMATCH: {self.handler.torchBiAdj.shape[0]} vs {args.user + args.item}")
         else:
-            log("❌ Missing torchBiAdj!")
+            log(" Missing torchBiAdj!")
             
         if hasattr(self.handler, 'allOneAdj'):
             log(f"allOneAdj shape: {self.handler.allOneAdj.shape}")
         else:
-            log("❌ Missing allOneAdj!")
+            log(" Missing allOneAdj!")
         
         # Verify match between embeddings and adjacency matrix
         if hasattr(self.model, 'uEmbeds') and hasattr(self.model, 'iEmbeds') and hasattr(self.handler, 'torchBiAdj'):
@@ -767,9 +765,9 @@ class Coach:
             adj_size = self.handler.torchBiAdj.shape[0]
             
             if total_embed_size == adj_size:
-                log("✅ DIMENSIONS MATCH - Training should work!")
+                log(" DIMENSIONS MATCH - Training should work!")
             else:
-                log(f"❌ CRITICAL MISMATCH: Embeddings ({total_embed_size}) vs Adjacency ({adj_size})")
+                log(f" CRITICAL MISMATCH: Embeddings ({total_embed_size}) vs Adjacency ({adj_size})")
         
         log("=" * 60)
 
@@ -906,10 +904,10 @@ class Coach:
                 self.handler.reset_cache_for_transfer()
                 self.sampler = LocalGraph(self.gtLayer)
                 self.masker = RandomMaskSubgraphs(args.user, args.item)
-                log("✅ Final reset complete")
+                log(" Final reset complete")
                 self.debug_model_dimensions()
             except Exception as e:
-                log(f"❌ ERROR in final reset: {e}")
+                log(f"ERROR in final reset: {e}")
                 import traceback
                 traceback.print_exc()
                 log("Training will likely fail due to dimension mismatch!")
@@ -917,7 +915,7 @@ class Coach:
         # Add embeddings dimension check
         log("🔍 Performing final embeddings dimension check...")
         if self.model.uEmbeds.shape[0] != args.user or self.model.iEmbeds.shape[0] != args.item:
-            log("❌ CRITICAL: Embedding dimensions still don't match!")
+            log("CRITICAL: Embedding dimensions still don't match!")
             log(f"Expected: users={args.user}, items={args.item}")
             log(f"Got: users={self.model.uEmbeds.shape[0]}, items={self.model.iEmbeds.shape[0]}")
             
@@ -934,18 +932,17 @@ class Coach:
             self.model.uEmbeds = new_uEmbeds
             self.model.iEmbeds = new_iEmbeds
             
-            # Also fix distill model
             self.distill_model.uEmbeds = nn.Parameter(new_uEmbeds.clone())
             self.distill_model.iEmbeds = nn.Parameter(new_iEmbeds.clone())
             
-            log("✅ Emergency embedding resize complete")
+            log("Emergency embedding resize complete")
             self.debug_model_dimensions()
                 # After replacing embeddings, recreate optimizer
-            log("🔄 Recreating optimizer to include new embeddings...")
+            log("Recreating optimizer to include new embeddings...")
             self.opt = torch.optim.Adam(self.model.parameters(), 
                                     lr=args.fine_tune_lr if hasattr(args, 'fine_tune_lr') else args.lr, 
                                     weight_decay=0)
-            log("✅ Optimizer updated with new embedding parameters")
+            log("Optimizer updated with new embedding parameters")
         # Training loop
         log(f"Starting training for {args.epoch} epochs...")
         

@@ -45,13 +45,13 @@ class DataHandler:
         
     def reset_cache_for_transfer(self):
         """Reset all cached data structures when transferring between datasets of different dimensions"""
-        log("🔄 CACHE RESET - STARTING")
+        log("CACHE RESET - STARTING")
         
         # First clear all cache attributes
         for attr in ['anchorset_id', 'dists_array', 'anchor_adj', 'pnn_cache', 
                     'torchBiAdj', 'allOneAdj']:  # Added torchBiAdj and allOneAdj to force rebuild
             if hasattr(self, attr):
-                log(f"  🗑️ Deleting {attr}")
+                log(f"Deleting {attr}")
                 delattr(self, attr)
         
         log(f"🔄 Rebuilding graph from scratch for dimensions...")
@@ -63,15 +63,15 @@ class DataHandler:
             log(f"  ✓ Loaded training matrix with shape {trnMat.shape}")
             
             # Force rebuild adjacency matrices with new dimensions
-            log("  🔨 Building torchBiAdj...")
+            log("  Building torchBiAdj...")
             self.torchBiAdj = self.makeTorchAdj(trnMat)
             log(f"  ✓ Built torchBiAdj with shape {self.torchBiAdj.shape}")
             
-            log("  🔨 Building allOneAdj...")
+            log("  Building allOneAdj...")
             self.allOneAdj = self.makeAllOne(self.torchBiAdj)
             log(f"  ✓ Built allOneAdj with shape {self.allOneAdj.shape}")
             
-            log("  🔨 Rebuilding anchor sets...")
+            log("  Rebuilding anchor sets...")
             self.preSelect_anchor_set()
             log("  ✓ Anchor sets rebuilt")
             
@@ -80,14 +80,14 @@ class DataHandler:
             actual_dim = self.torchBiAdj.shape[0]
             
             if expected_dim != actual_dim:
-                log(f"⚠️ DIMENSION MISMATCH: Expected {expected_dim} but got {actual_dim}")
+                log(f"DIMENSION MISMATCH: Expected {expected_dim} but got {actual_dim}")
             else:
-                log(f"✅ DIMENSIONS MATCH: {actual_dim} nodes")
+                log(f" DIMENSIONS MATCH: {actual_dim} nodes")
                 
             log("🔄 CACHE RESET - COMPLETE")
             
         except Exception as e:
-            log(f"❌ ERROR during cache reset: {e}")
+            log(f" ERROR during cache reset: {e}")
             import traceback
             traceback.print_exc()
 
