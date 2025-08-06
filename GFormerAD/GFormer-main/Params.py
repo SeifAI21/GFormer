@@ -61,6 +61,10 @@ def ParseArgs():
     parser.add_argument('--fine_tune_lr', type=float, default=None, help='Different learning rate for fine-tuning (if not set, uses --lr)')
     parser.add_argument('--frozen_lr_scale', type=float, default=0.1, help='Learning rate scale for frozen->unfrozen layers')
     
+    # ===== CURRICULUM LEARNING PARAMETERS =====
+    parser.add_argument('--curriculum', default=False, action='store_true', help='Enable curriculum learning')
+    parser.add_argument('--curriculum_schedule', default='0.2,0.5,1.0', type=str, help='Comma-separated schedule for data inclusion (e.g., 0.2,0.5,1.0)')
+    parser.add_argument('--curriculum_epochs', default='30,30,40', type=str, help='Comma-separated epochs for each curriculum stage')
 
     return parser.parse_args()
 
