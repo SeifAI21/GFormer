@@ -193,7 +193,8 @@ class DataHandler:
         cols = [i[1] for i in subset_interactions]
         data = np.ones(len(rows))
         
-        curriculum_matrix = csr_matrix((data, (rows, cols)), shape=(args.user, args.item))
+        # FIX: Create a coo_matrix directly, as TrnData expects this format
+        curriculum_matrix = coo_matrix((data, (rows, cols)), shape=(args.user, args.item))
         
         # Return a new loader with this matrix
         return dataloader.DataLoader(TrnData(curriculum_matrix), batch_size=args.batch, shuffle=True, num_workers=0)
