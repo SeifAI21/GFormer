@@ -10,7 +10,7 @@ import torch.utils.data as data
 import torch.utils.data as dataloader
 import networkx as nx
 import os
-
+from collections import Counter
 
 
 class DataHandler:
@@ -31,15 +31,15 @@ class DataHandler:
         else:
             raise ValueError(f"Unknown data key: {args.data}")
 
-        self.predir = predir  # Now always defined
+        self.predir = predir
         self.trnfile = os.path.join(predir, 'trnMat.pkl')
         self.valfile = os.path.join(predir, 'valMat.pkl')
         self.tstfile = os.path.join(predir, 'tstMat.pkl')
+        self.sorted_interactions = None # For curriculum learning
 
     def single_source_shortest_path_length_range(self, graph, node_range, cutoff=None):
         dists_dict = {}
         for node in node_range:
-            # Using Dijkstra's method with cutoff
             dists_dict[node] = nx.single_source_dijkstra_path_length(graph, node, cutoff=cutoff)
         return dists_dict
         
@@ -47,9 +47,8 @@ class DataHandler:
         """Reset all cached data structures when transferring between datasets of different dimensions"""
         log("CACHE RESET - STARTING")
         
-        # First clear all cache attributes
         for attr in ['anchorset_id', 'dists_array', 'anchor_adj', 'pnn_cache', 
-                    'torchBiAdj', 'allOneAdj']:  # Added torchBiAdj and allOneAdj to force rebuild
+                    'torchBiAdj', 'allOneAdj']:
             if hasattr(self, attr):
                 log(f"Deleting {attr}")
                 delattr(self, attr)
@@ -57,12 +56,10 @@ class DataHandler:
         log(f"🔄 Rebuilding graph from scratch for dimensions...")
         log(f"  • Current dimensions: users={args.user}, items={args.item}, total={args.user+args.item}")
         
-        # Load the training data from disk to ensure fresh data
         try:
             trnMat = self.loadOneFile(self.trnfile)
             log(f"  ✓ Loaded training matrix with shape {trnMat.shape}")
             
-            # Force rebuild adjacency matrices with new dimensions
             log("  Building torchBiAdj...")
             self.torchBiAdj = self.makeTorchAdj(trnMat)
             log(f"  ✓ Built torchBiAdj with shape {self.torchBiAdj.shape}")
@@ -75,7 +72,6 @@ class DataHandler:
             self.preSelect_anchor_set()
             log("  ✓ Anchor sets rebuilt")
             
-            # Verify that dimensions match what we expect
             expected_dim = args.user + args.item
             actual_dim = self.torchBiAdj.shape[0]
             
@@ -115,7 +111,7 @@ class DataHandler:
                 if dist != -1:
                     dists_array[i, j] = 1 / (dist + 1)
         self.dists_array = dists_array
-        self.anchorset_id = annchorset_id #
+        self.anchorset_id = annchorset_id
 
     def preSelect_anchor_set(self):
         self.num_nodes = args.user + args.item
@@ -143,7 +139,6 @@ class DataHandler:
         mat = (mat + sp.eye(mat.shape[0])) * 1.0
         mat = self.normalizeAdj(mat)
 
-        # make cuda tensor
         idxs = t.from_numpy(np.vstack([mat.row, mat.col]).astype(np.int64))
         vals = t.from_numpy(mat.data.astype(np.float32))
         shape = t.Size(mat.shape)
@@ -161,14 +156,47 @@ class DataHandler:
         tstMat = self.loadOneFile(self.tstfile)
         args.user, args.item = trnMat.shape
 
+        # --- ADDED FOR CURRICULUM LEARNING ---
+        if args.curriculum:
+            log("Preparing data for Curriculum Learning...")
+            item_counts = Counter(trnMat.tocoo().col)
+            interactions = list(zip(trnMat.tocoo().row, trnMat.tocoo().col))
+            self.sorted_interactions = sorted(interactions, key=lambda x: item_counts[x[1]], reverse=True)
+            log(f"  Sorted {len(self.sorted_interactions):,} interactions by item frequency.")
+        # --- END OF CURRICULUM BLOCK ---
+
         self.torchBiAdj = self.makeTorchAdj(trnMat)
         self.allOneAdj = self.makeAllOne(self.torchBiAdj)
+        
+        # The initial loader uses the full training matrix
         trnData = TrnData(trnMat)
         self.trnLoader = dataloader.DataLoader(trnData, batch_size=args.batch, shuffle=True, num_workers=0)
+        
         valData = ValData(valMat)
         self.valLoader = dataloader.DataLoader(valData, batch_size=args.batch, shuffle=True, num_workers=0)
         tstData = TstData(tstMat, trnMat)
         self.tstLoader = dataloader.DataLoader(tstData, batch_size=args.tstBat, shuffle=False, num_workers=0)
+
+    def get_curriculum_loader(self, data_fraction):
+        """Creates a TrnLoader with a fraction of the sorted data."""
+        if not self.sorted_interactions:
+            log("ERROR: Curriculum learning enabled, but sorted interactions not found.")
+            # Fallback to the original loader
+            return self.trnLoader
+
+        num_to_keep = int(len(self.sorted_interactions) * data_fraction)
+        log(f"  Creating curriculum loader with {num_to_keep:,} interactions ({data_fraction*100:.0f}% of total)")
+        
+        subset_interactions = self.sorted_interactions[:num_to_keep]
+        
+        rows = [i[0] for i in subset_interactions]
+        cols = [i[1] for i in subset_interactions]
+        data = np.ones(len(rows))
+        
+        curriculum_matrix = csr_matrix((data, (rows, cols)), shape=(args.user, args.item))
+        
+        # Return a new loader with this matrix
+        return dataloader.DataLoader(TrnData(curriculum_matrix), batch_size=args.batch, shuffle=True, num_workers=0)
 
 
 class TrnData(data.Dataset):
