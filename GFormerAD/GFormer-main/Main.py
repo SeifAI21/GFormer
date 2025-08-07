@@ -1155,6 +1155,10 @@ class Coach:
             total_epochs = sum([int(e) for e in args.curriculum_epochs.split(',')]) if hasattr(args, 'curriculum') and args.curriculum else args.epoch
             self.progressive_unfreeze_layers(self.current_epoch, total_epochs)
         
+        # Calculate temperature for current epoch
+        total_epochs = sum([int(e) for e in args.curriculum_epochs.split(',')]) if hasattr(args, 'curriculum') and args.curriculum else args.epoch
+        temperature = self.calculate_temperature(self.current_epoch if hasattr(self, 'current_epoch') else 0, total_epochs)
+        
         trnLoader = self.handler.trnLoader
         trnLoader.dataset.negSampling()
         epLoss, epPreLoss = 0, 0
@@ -1164,19 +1168,27 @@ class Coach:
         for i, tem in enumerate(trnLoader):
             if i % args.fixSteps == 0:
                 att_edge, add_adj = self.sampler(self.handler.torchBiAdj, self.model.getEgoEmbeds(),
-                                                 self.handler)
+                                                self.handler)
                 encoderAdj, decoderAdj, sub, cmp = self.masker(add_adj, att_edge)
             ancs, poss, negs = tem
             ancs = ancs.long().cuda()
             poss = poss.long().cuda()
             negs = negs.long().cuda()
 
-            # Generate distillation targets
+            # Generate distillation targets with temperature
             with torch.no_grad():
                 distill_usrEmbeds, distill_itmEmbeds, distill_cList, distill_subLst = self.distill_model(
                     self.handler, False, sub, cmp, encoderAdj, decoderAdj)
 
-            usrEmbeds, itmEmbeds, cList, subLst = self.model(self.handler, False, sub, cmp, encoderAdj, decoderAdj)
+            # Pass temperature to model if the model accepts it
+            try:
+                usrEmbeds, itmEmbeds, cList, subLst = self.model(
+                    self.handler, False, sub, cmp, encoderAdj, decoderAdj, temperature=temperature)
+            except TypeError:
+                # If model doesn't accept temperature parameter
+                usrEmbeds, itmEmbeds, cList, subLst = self.model(
+                    self.handler, False, sub, cmp, encoderAdj, decoderAdj)
+                
             ancEmbeds = usrEmbeds[ancs]
             posEmbeds = itmEmbeds[poss]
             negEmbeds = itmEmbeds[negs]
@@ -1186,16 +1198,17 @@ class Coach:
             ancEmbeds2 = usrEmbeds2[ancs]
             posEmbeds2 = itmEmbeds2[poss]
 
-            bprLoss = (-torch.sum(ancEmbeds * posEmbeds, dim=-1)).mean()
+            # Apply temperature to losses
+            bprLoss = (-torch.sum(ancEmbeds * posEmbeds, dim=-1)).mean() * temperature
             scoreDiff = pairPredict(ancEmbeds2, posEmbeds2, negEmbeds)
-            bprLoss2 = - (scoreDiff).sigmoid().log().sum() / args.batch
+            bprLoss2 = -(scoreDiff).sigmoid().log().sum() / args.batch * temperature
 
             regLoss = calcRegLoss(self.model) * args.reg
 
-            contrastLoss = (contrast(ancs, usrEmbeds) + contrast(poss, itmEmbeds)) * args.ssl_reg + contrast(
-                ancs,
-                usrEmbeds,
-                itmEmbeds) + args.ctra * contrastNCE(ancs, subLst, cList)
+            # Apply temperature to contrastive loss
+            contrastLoss = ((contrast(ancs, usrEmbeds) + contrast(poss, itmEmbeds)) * args.ssl_reg + 
+                        contrast(ancs, usrEmbeds, itmEmbeds) + 
+                        args.ctra * contrastNCE(ancs, subLst, cList)) * temperature
 
             # Calculate distillation losses
             distill_loss_usr = F.mse_loss(usrEmbeds, distill_usrEmbeds)
@@ -1214,8 +1227,8 @@ class Coach:
             loss.backward()
             nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=20, norm_type=2)
             self.opt.step()
-            log('Step %d/%d: loss = %.3f, regLoss = %.3f, clLoss = %.3f        ' % (
-                i, steps, loss, regLoss, contrastLoss), save=False, oneline=True)
+            log('Step %d/%d: loss = %.3f, regLoss = %.3f, clLoss = %.3f, temp = %.3f        ' % (
+                i, steps, loss, regLoss, contrastLoss, temperature), save=False, oneline=True)
 
         # Update the distillation model
         self.distill_model.load_state_dict(self.model.state_dict())
@@ -1223,9 +1236,13 @@ class Coach:
         ret = dict()
         ret['Loss'] = epLoss / steps
         ret['preLoss'] = epPreLoss / steps
+        ret['Temperature'] = temperature  # Add temperature to metrics
         return ret
     
     def valEpoch(self):
+        total_epochs = sum([int(e) for e in args.curriculum_epochs.split(',')]) if hasattr(args, 'curriculum') and args.curriculum else args.epoch
+        temperature = self.calculate_temperature(self.current_epoch if hasattr(self, 'current_epoch') else 0, total_epochs)
+
         valLoader = self.handler.valLoader
         epLoss, epPreLoss = 0, 0
         steps = valLoader.dataset.__len__() // args.batch
@@ -1274,6 +1291,40 @@ class Coach:
             ret['preLoss'] = 0
         return ret
             
+    def calculate_temperature(self, epoch, total_epochs):
+        """Calculate temperature based on the current epoch and schedule"""
+        if not hasattr(args, 'heating') or not args.heating:
+            # Default temperature if heating is not enabled
+            return 1.0
+        
+        min_temp = getattr(args, 'min_temp', 0.1)
+        max_temp = getattr(args, 'max_temp', 10.0)
+        schedule = getattr(args, 'temp_schedule', 'linear')
+        
+        # Calculate progress from 0 to 1
+        progress = epoch / total_epochs
+        
+        # Apply different schedules
+        if schedule == 'linear':
+            # Linear increase from min_temp to max_temp
+            temp = min_temp + (max_temp - min_temp) * progress
+        elif schedule == 'exponential':
+            # Exponential increase (like CoHeat)
+            temp = min_temp * (max_temp / min_temp) ** progress
+        elif schedule == 'step':
+            # Step-wise increase
+            if progress < 0.3:
+                temp = min_temp
+            elif progress < 0.6:
+                temp = (min_temp + max_temp) / 2
+            else:
+                temp = max_temp
+        else:
+            # Default to linear
+            temp = min_temp + (max_temp - min_temp) * progress
+        
+        log(f"Epoch {epoch}/{total_epochs}: Temperature = {temp:.4f}", save=False)
+        return temp
     def testEpoch(self):
         # Ensure model is in evaluation mode
         self.model.eval()
