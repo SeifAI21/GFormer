@@ -624,8 +624,6 @@ class Coach:
             # Transfer only compatible layers, explicitly skip embeddings
             for name, param in source_state.items():
                 # Skip embeddings as we've already created new ones
-
-                
                 if name == 'uEmbeds' or name == 'iEmbeds':
                     skipped_layers.append(name)
                     log(f"⚠️ Skipping embedding: {name} (using newly created embeddings)")
@@ -771,10 +769,11 @@ class Coach:
         
         log("=" * 60)
 
-
-
-    def makePrint(self, name, ep, reses, save):
-        ret = 'Epoch %d/%d, %s: ' % (ep, args.epoch, name)
+    def makePrint(self, name, ep, reses, save, total_epochs=None):
+        if total_epochs is not None:
+            ret = 'Epoch %d/%d, %s: ' % (ep, total_epochs, name)
+        else:
+            ret = 'Epoch %d/%d, %s: ' % (ep, args.epoch, name)
         for metric in reses:
             val = reses[metric]
             ret += '%s = %.4f, ' % (metric, val)
@@ -783,6 +782,221 @@ class Coach:
                 self.metrics[tem].append(val)
         ret = ret[:-2] + '  '
         return ret
+
+    def run_with_curriculum(self):
+        """Run training with curriculum learning schedule."""
+        log("Starting training with Curriculum Learning...")
+
+        # Parse curriculum schedule
+        try:
+            data_fractions = [float(f) for f in args.curriculum_schedule.split(',')]
+            stage_epochs = [int(e) for e in args.curriculum_epochs.split(',')]
+            if len(data_fractions) != len(stage_epochs):
+                log("ERROR: Curriculum schedule and epochs must have the same number of stages.")
+                return
+        except Exception as e:
+            log(f"ERROR: Could not parse curriculum arguments: {e}")
+            return
+
+        total_epochs = sum(stage_epochs)
+        global_epoch = self.start_epoch
+        bestRes = None
+        result = []
+
+        for stage_idx, data_fraction in enumerate(data_fractions):
+            epochs_in_stage = stage_epochs[stage_idx]
+            log("=" * 60)
+            log(f"CURRICULUM STAGE {stage_idx + 1}/{len(data_fractions)}")
+            log(f"  Data Fraction: {data_fraction * 100:.0f}%")
+            log(f"  Epochs in this stage: {epochs_in_stage}")
+            log("=" * 60)
+
+            # Get curriculum data loader for current stage
+            self.handler.trnLoader = self.handler.get_curriculum_loader(data_fraction)
+
+            for stage_epoch in range(epochs_in_stage):
+                if global_epoch >= total_epochs:
+                    break
+                
+                # Set current epoch for progressive unfreezing
+                self.current_epoch = global_epoch
+                
+                # Set models to training mode
+                self.model.train()
+                self.distill_model.train()
+
+                # Train one epoch
+                try:
+                    train_res = self.trainEpoch()
+                    log(self.makePrint(f'Train (Stage {stage_idx+1})', global_epoch, train_res, True, total_epochs))
+                except Exception as e:
+                    log(f"Training error at epoch {global_epoch}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    break
+
+                # Test every tstEpoch
+                if global_epoch % args.tstEpoch == 0:
+                    # Set models to evaluation mode
+                    self.model.eval()
+                    self.distill_model.eval()
+                    
+                    try:
+                        val_res = self.valEpoch()
+                        log(self.makePrint('Validation', global_epoch, val_res, True, total_epochs))
+                        
+                        test_res = self.testEpoch()
+                        log(self.makePrint('Test', global_epoch, test_res, True, total_epochs))
+
+                        # Check if this is the best model
+                        is_best = test_res['Recall'] > self.best_recall
+                        if is_best:
+                            self.best_recall = test_res['Recall']
+                            self.best_ndcg = test_res['NDCG']
+                            bestRes = test_res
+                        
+                        # Save checkpoint
+                        self.save_checkpoint(global_epoch, is_best=is_best)
+                        
+                        # Save weights periodically
+                        if global_epoch % (args.tstEpoch * 2) == 0:
+                            self.save_model_weights(global_epoch, '_curriculum')
+                        
+                        self.saveHistory()
+                        result.append(test_res)
+                        
+                    except Exception as e:
+                        log(f"Testing error at epoch {global_epoch}: {e}")
+                        import traceback
+                        traceback.print_exc()
+
+                # Save checkpoint periodically
+                elif global_epoch % 10 == 0:
+                    self.save_checkpoint(global_epoch, is_best=False)
+
+                global_epoch += 1
+                print()
+
+        # Final evaluation and save
+        try:
+            self.model.eval()
+            self.distill_model.eval()
+            
+            final_res = self.testEpoch()
+            result.append(final_res)
+            
+            self.save_checkpoint(total_epochs - 1, is_final=True)
+            torch.save(result, f"Curriculum_result_{args.data}.pkl")
+            
+            log(self.makePrint('Final Test', total_epochs, final_res, True, total_epochs))
+            
+            if bestRes is not None:
+                log(self.makePrint('Best Result', total_epochs, bestRes, True, total_epochs))
+            
+            self.saveHistory()
+            
+        except Exception as e:
+            log(f"Final evaluation error: {e}")
+            import traceback
+            traceback.print_exc()
+
+        log("Curriculum training complete.")
+
+    def run_standard_training(self):
+        """Run standard training loop (the original training logic)."""
+        log(f"Starting standard training for {args.epoch} epochs...")
+        bestRes = None
+        result = []
+        
+        for ep in range(self.start_epoch, args.epoch):
+            # Set current epoch for progressive unfreezing
+            self.current_epoch = ep
+            
+            # Set models to training mode
+            self.model.train()
+            self.distill_model.train()
+            
+            tstFlag = (ep % args.tstEpoch == 0)
+            
+            try:
+                reses = self.trainEpoch()
+                log(self.makePrint('Train', ep, reses, tstFlag))
+            except Exception as e:
+                log(f"Training error at epoch {ep}: {e}")
+                import traceback
+                traceback.print_exc()
+                break
+            
+            if tstFlag:
+                # Set models to evaluation mode for testing
+                self.model.eval()
+                self.distill_model.eval()
+                
+                try:
+                    reses = self.valEpoch()
+                    log(self.makePrint('Validation', ep, reses, tstFlag))
+            
+                    reses = self.testEpoch()
+                    log(self.makePrint('Test', ep, reses, tstFlag))
+                    
+                    # Check if this is the best model
+                    is_best = reses['Recall'] > self.best_recall
+                    if is_best:
+                        self.best_recall = reses['Recall']
+                        self.best_ndcg = reses['NDCG']
+                        bestRes = reses
+                    
+                    # Save checkpoint
+                    self.save_checkpoint(ep, is_best=is_best)
+                    
+                    # Save weights periodically
+                    if ep % (args.tstEpoch * 2) == 0:
+                        self.save_model_weights(ep, '_standard')
+                    
+                    self.saveHistory()
+                    result.append(reses)
+                    
+                    if bestRes is None:
+                        bestRes = reses
+                        
+                except Exception as e:
+                    log(f"Testing error at epoch {ep}: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # Save checkpoint periodically
+            elif ep % 10 == 0:
+                self.save_checkpoint(ep, is_best=False)
+            
+            print()
+        
+        # Final evaluation and save
+        if args.epoch > 0:
+            try:
+                self.model.eval()
+                self.distill_model.eval()
+                
+                reses = self.testEpoch()
+                result.append(reses)
+                
+                self.save_checkpoint(args.epoch - 1, is_final=True)
+                torch.save(result, f"Standard_result_{args.data}.pkl")
+                
+                log(self.makePrint('Final Test', args.epoch, reses, True))
+                
+                if bestRes is not None:
+                    log(self.makePrint('Best Result', args.epoch, bestRes, True))
+                else:
+                    log('No best result available')
+                
+                self.saveHistory()
+                
+            except Exception as e:
+                log(f"Final evaluation error: {e}")
+                import traceback
+                traceback.print_exc()
+
+        log("Standard training complete.")
 
     def run(self):
         self.prepareModel()
@@ -863,9 +1077,6 @@ class Coach:
         else:
             log('Model Initialized from scratch')
         
-        bestRes = None
-        result = []
-        
         # Handle evaluation-only mode (epoch=0)
         if args.epoch == 0:
             log('Evaluation-only mode (epoch=0)')
@@ -882,53 +1093,40 @@ class Coach:
             reses = self.testEpoch()
             log(self.makePrint('Evaluation', 0, reses, True))
             
-            bestRes = reses
-            
             # Save evaluation results
             torch.save([reses], f"Evaluation_result_{args.data}.pkl")
             log('Evaluation completed and results saved')
-            
-            if bestRes is not None:
-                log(self.makePrint('Best Result', 0, bestRes, True))
-            
             return
 
-
         # Final dimension check before training
-        log("final dimension check before training...")
+        log("Final dimension check before training...")
         self.debug_model_dimensions()
 
-        if self.handler.torchBiAdj.shape[0] != args.user + args.item:
+        if hasattr(self.handler, 'torchBiAdj') and self.handler.torchBiAdj.shape[0] != args.user + args.item:
             log("CRITICAL: Dimensions still don't match! Forcing final cache reset...")
             try:
                 self.handler.reset_cache_for_transfer()
                 self.sampler = LocalGraph(self.gtLayer)
                 self.masker = RandomMaskSubgraphs(args.user, args.item)
-                log(" Final reset complete")
+                log("Final reset complete")
                 self.debug_model_dimensions()
             except Exception as e:
                 log(f"ERROR in final reset: {e}")
                 import traceback
                 traceback.print_exc()
                 log("Training will likely fail due to dimension mismatch!")
-        
-        # Add embeddings dimension check
-        log(" Performing final embeddings dimension check...")
+
+        # Emergency embedding dimension fix
         if self.model.uEmbeds.shape[0] != args.user or self.model.iEmbeds.shape[0] != args.item:
             log("CRITICAL: Embedding dimensions still don't match!")
-            log(f"Expected: users={args.user}, items={args.item}")
-            log(f"Got: users={self.model.uEmbeds.shape[0]}, items={self.model.iEmbeds.shape[0]}")
+            log("Attempting emergency embedding resize...")
             
-            log(" Attempting emergency embedding resize...")
-            
-            # Create new embedding layers with correct dimensions
             new_uEmbeds = nn.Parameter(torch.empty(args.user, self.model.uEmbeds.shape[1], device=self.model.uEmbeds.device))
             nn.init.xavier_uniform_(new_uEmbeds)
             
             new_iEmbeds = nn.Parameter(torch.empty(args.item, self.model.iEmbeds.shape[1], device=self.model.iEmbeds.device))
             nn.init.xavier_uniform_(new_iEmbeds)
             
-            # Replace embeddings
             self.model.uEmbeds = new_uEmbeds
             self.model.iEmbeds = new_iEmbeds
             
@@ -936,116 +1134,33 @@ class Coach:
             self.distill_model.iEmbeds = nn.Parameter(new_iEmbeds.clone())
             
             log("Emergency embedding resize complete")
-            self.debug_model_dimensions()
-                # After replacing embeddings, recreate optimizer
-            log("Recreating optimizer to include new embeddings...")
+            
+            # Recreate optimizer
             self.opt = torch.optim.Adam(self.model.parameters(), 
                                     lr=args.fine_tune_lr if hasattr(args, 'fine_tune_lr') else args.lr, 
                                     weight_decay=0)
             log("Optimizer updated with new embedding parameters")
-        # Training loop
-        log(f"Starting training for {args.epoch} epochs...")
-        
-        for ep in range(self.start_epoch, args.epoch):
-            # Set models to training mode
-            self.model.train()
-            self.distill_model.train()
-            
-            tstFlag = (ep % args.tstEpoch == 0)
-            
-            try:
-                reses = self.trainEpoch()
-                log(self.makePrint('Train', ep, reses, tstFlag))
-            except Exception as e:
-                log(f"Training error at epoch {ep}: {e}")
-                import traceback
-                traceback.print_exc()
-                break
-            
-            if tstFlag:
-                # Set models to evaluation mode for testing
-                self.model.eval()
-                self.distill_model.eval()
-                
-                try:
-                    reses = self.valEpoch()
-                    log(self.makePrint('Validation', ep, reses, tstFlag))
-            
-                    reses = self.testEpoch()
-                    log(self.makePrint('Test', ep, reses, tstFlag))
-                    
-                    # Check if this is the best model
-                    is_best = reses['Recall'] > self.best_recall
-                    if is_best:
-                        self.best_recall = reses['Recall']
-                        self.best_ndcg = reses['NDCG']
-                        bestRes = reses
-                    
-                    # Save checkpoint
-                    if hasattr(args, 'save_freq') and (ep % args.save_freq == 0 or is_best):
-                        self.save_checkpoint(ep, is_best=is_best)
-                    else:
-                        self.save_checkpoint(ep, is_best=is_best)
-                    
-                    # Save weights
-                    if hasattr(args, 'save_weights_freq') and (ep % args.save_weights_freq == 0):
-                        self.save_model_weights(ep)
-                    elif ep % (args.tstEpoch * 2) == 0:
-                        self.save_model_weights(ep)
-                    
-                    self.saveHistory()
-                    result.append(reses)
-                    
-                    if bestRes is None:
-                        bestRes = reses
-                        
-                except Exception as e:
-                    log(f"Testing error at epoch {ep}: {e}")
-                    import traceback
-                    traceback.print_exc()
-            
-            # Save checkpoint every save_freq epochs
-            elif hasattr(args, 'save_freq') and (ep % args.save_freq == 0):
-                self.save_checkpoint(ep, is_best=False)
-            elif ep % 10 == 0:
-                self.save_checkpoint(ep, is_best=False)
-            
-            print()
-        
-        # Final evaluation and save
-        if args.epoch > 0:
-            try:
-                self.model.eval()
-                self.distill_model.eval()
-                
-                reses = self.testEpoch()
-                result.append(reses)
-                
-                self.save_checkpoint(args.epoch - 1, is_final=True)
-                torch.save(result, f"Transfer_result_{args.data}.pkl")
-                
-                log(self.makePrint('Final Test', args.epoch, reses, True))
-                
-                if bestRes is not None:
-                    log(self.makePrint('Best Result', args.epoch, bestRes, True))
-                else:
-                    log('No best result available')
-                
-                self.saveHistory()
-                
-            except Exception as e:
-                log(f"Final evaluation error: {e}")
-                import traceback
-                traceback.print_exc()
+
+        # DISPATCH TO APPROPRIATE TRAINING METHOD
+        if hasattr(args, 'curriculum') and args.curriculum:
+            log("Dispatching to curriculum learning...")
+            self.run_with_curriculum()
+        else:
+            log("Dispatching to standard training...")
+            self.run_standard_training()
 
     def trainEpoch(self):
+        # Progressive unfreezing
         if hasattr(self, 'current_epoch') and hasattr(args, 'progressive_unfreeze') and args.progressive_unfreeze:
-            self.progressive_unfreeze_layers(self.current_epoch, args.epoch)
+            total_epochs = sum([int(e) for e in args.curriculum_epochs.split(',')]) if hasattr(args, 'curriculum') and args.curriculum else args.epoch
+            self.progressive_unfreeze_layers(self.current_epoch, total_epochs)
+        
         trnLoader = self.handler.trnLoader
         trnLoader.dataset.negSampling()
         epLoss, epPreLoss = 0, 0
         steps = trnLoader.dataset.__len__() // args.batch
         self.handler.preSelect_anchor_set()
+        
         for i, tem in enumerate(trnLoader):
             if i % args.fixSteps == 0:
                 att_edge, add_adj = self.sampler(self.handler.torchBiAdj, self.model.getEgoEmbeds(),
@@ -1211,7 +1326,7 @@ class Coach:
         return allRecall, allNdcg
 
     def saveHistory(self):
-        if args.epoch == 0:
+        if args.epoch == 0 and not (hasattr(args, 'curriculum') and args.curriculum):
             return
         with open('History/' + args.save_path + '.his', 'wb') as fs:
             pickle.dump(self.metrics, fs)
