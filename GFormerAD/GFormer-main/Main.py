@@ -677,36 +677,53 @@ class Coach:
         ret = ret[:-2] + '  '
         return ret
 
+
+
     def run(self):
         self.prepareModel()
         log('Model Prepared')
         
         checkpoint_loaded = False
 
+        # FIX: Explicitly check for transfer learning scenario first
         if hasattr(args, 'load_weights') and args.load_weights:
-            checkpoint_loaded = self.load_model_weights(args.load_weights)
-            if not checkpoint_loaded:
-                log('Regular weight loading failed, attempting transfer learning...')
+            # Attempt to load weights directly. If it fails, it's likely a transfer learning case.
+            try:
+                # Use a temporary model to check dimensions without altering the main model yet
+                temp_model = Model(self.ResidualGTLayer)
+                weights = torch.load(args.load_weights, map_location='cpu', weights_only=False)
+                
+                # Extract state dict robustly
+                if 'model_state_dict' in weights:
+                    state_dict = weights['model_state_dict']
+                elif 'model' in weights and hasattr(weights['model'], 'state_dict'):
+                    state_dict = weights['model'].state_dict()
+                else:
+                    state_dict = weights
+
+                temp_model.load_state_dict(state_dict, strict=True)
+                # If the above line works, it's a normal load, not transfer
+                log("Weight dimensions match. Performing a standard weight load.")
+                checkpoint_loaded = self.load_model_weights(args.load_weights)
+            except RuntimeError as e:
+                # This is the expected path for transfer learning
+                log(f"Dimension mismatch detected ({e}). Initiating transfer learning protocol.")
                 checkpoint_loaded = self.load_model_weights_for_transfer(args.load_weights)
                 if checkpoint_loaded:
                     self.debug_model_dimensions()
-                    log('Transfer learning completed successfully')
+                    log('Transfer learning completed successfully.')
+                    # Re-apply freezing strategy after new layers are created
                     if (hasattr(args, 'freeze_first_percent') and args.freeze_first_percent > 0) or \
                        (hasattr(args, 'freeze_last_percent') and args.freeze_last_percent > 0) or \
                        (hasattr(args, 'freeze_embeddings') and args.freeze_embeddings) or \
                        (hasattr(args, 'freeze_backbone') and args.freeze_backbone):
                         log("Reapplying freezing strategy after transfer learning...")
                         self.apply_freezing_strategy()
-                        self.setup_fine_tuning_optimizer()
-            if checkpoint_loaded:
-                if args.epoch == 0:
-                    self.model.eval()
-                    self.distill_model.eval()
-                else:
-                    self.model.train()
-                    self.distill_model.train()
-            else:
-                log('Failed to load model weights (both regular and transfer learning)')
+                    # Re-create optimizer with correct parameters and fine-tuning LR
+                    self.setup_fine_tuning_optimizer()
+
+            if not checkpoint_loaded:
+                 log('CRITICAL: Failed to load model weights (both standard and transfer learning).')
 
         elif hasattr(args, 'load_checkpoint') and args.load_checkpoint:
             checkpoint_loaded = self.load_checkpoint(args.load_checkpoint)
@@ -738,6 +755,8 @@ class Coach:
             self.run_with_curriculum()
         else:
             self.run_standard()
+
+
 
     def run_standard(self):
         """Run the standard training loop for a fixed number of epochs."""
