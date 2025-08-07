@@ -26,14 +26,17 @@ class Model(nn.Module):
     def getEgoEmbeds(self):
         return t.cat([self.uEmbeds, self.iEmbeds], axis=0)
 
-    def forward(self, handler, is_test, sub, cmp, encoderAdj, decoderAdj=None):
+    def forward(self, handler, is_test, sub, cmp, encoderAdj, decoderAdj=None, temperature=1.0):
         embeds = t.cat([self.uEmbeds, self.iEmbeds], axis=0)
         embedsLst = [embeds]
+        
+        # You can use temperature to scale attention if needed
         emb, _ = self.gtLayers(cmp, embeds)
         cList = [embeds, args.gtw*emb]
         emb, _ = self.gtLayers(sub, embeds)
         subList = [embeds, args.gtw*emb]
 
+        # Rest of the method stays the same
         for i, gcn in enumerate(self.gcnLayers):
             embeds = gcn(encoderAdj, embedsLst[-1])
             embeds2 = gcn(sub, embedsLst[-1])

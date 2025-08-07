@@ -66,6 +66,12 @@ def ParseArgs():
     parser.add_argument('--curriculum_schedule', default='0.2,0.5,1.0', type=str, help='Comma-separated schedule for data inclusion (e.g., 0.2,0.5,1.0)')
     parser.add_argument('--curriculum_epochs', default='30,30,40', type=str, help='Comma-separated epochs for each curriculum stage')
 
+    # Add these arguments to the parser in Params.py
+    parser.add_argument('--heating', type=int, default=0, help='Enable curriculum heating (1/0)')
+    parser.add_argument('--max_temp', type=float, default=10.0, help='Maximum temperature for curriculum heating')
+    parser.add_argument('--min_temp', type=float, default=0.1, help='Minimum temperature for curriculum heating')
+    parser.add_argument('--temp_schedule', type=str, default='linear', help='Temperature schedule: linear, exponential, or step')
+
     return parser.parse_args()
 
 args = ParseArgs()
