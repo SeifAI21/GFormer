@@ -572,158 +572,301 @@ class Coach:
             log(f'Legacy loading failed: {e}')
             return False
 
+    # def load_model_weights_for_transfer(self, weights_path):
+    #     """Load weights for transfer learning, handling dataset size mismatches"""
+    #     if not os.path.exists(weights_path):
+    #         log(f'Weights file not found: {weights_path}')
+    #         return False
+
+    #     try:
+    #         log(f'Loading weights for transfer learning: {weights_path}')
+            
+    #         # Load checkpoint
+    #         ckpt = torch.load(weights_path,
+    #                     map_location='cuda' if torch.cuda.is_available() else 'cpu',
+    #                     weights_only=False)
+            
+    #         # Extract source state dict
+    #         if 'model_state_dict' in ckpt:
+    #             source_state = ckpt['model_state_dict']
+    #         elif 'model' in ckpt and hasattr(ckpt['model'], 'state_dict'):
+    #             source_state = ckpt['model'].state_dict()
+    #         else:
+    #             source_state = ckpt
+
+    #         # Print source and target dimensions for debugging
+    #         log(f"SOURCE MODEL DIMENSIONS: users={source_state['uEmbeds'].shape[0]}, items={source_state['iEmbeds'].shape[0]}")
+    #         log(f"TARGET MODEL DIMENSIONS: users={args.user}, items={args.item}")
+            
+    #         # Get current model state
+    #         current_state = self.model.state_dict()
+            
+    #         # Create a modified state that starts with current model's state
+    #         modified_state = {k: v.clone() for k, v in current_state.items()}
+    #         transferred_layers, skipped_layers = [], []
+            
+    #         log(" Creating new embeddings with correct dimensions")
+            
+    #         # Create new user embeddings with correct dimension
+    #         new_uEmbeds = nn.Parameter(torch.empty(args.user, source_state['uEmbeds'].shape[1]))
+    #         nn.init.xavier_uniform_(new_uEmbeds)
+            
+    #         # Create new item embeddings with correct dimension
+    #         new_iEmbeds = nn.Parameter(torch.empty(args.item, source_state['iEmbeds'].shape[1]))
+    #         nn.init.xavier_uniform_(new_iEmbeds)
+            
+    #         # Replace in modified state
+    #         modified_state['uEmbeds'] = new_uEmbeds
+    #         modified_state['iEmbeds'] = new_iEmbeds
+    #         log(f" Created new user embeddings: {new_uEmbeds.shape}")
+    #         log(f"Created new item embeddings: {new_iEmbeds.shape}")
+            
+    #         # Transfer only compatible layers, explicitly skip embeddings
+    #         for name, param in source_state.items():
+    #             # Skip embeddings as we've already created new ones
+    #             if name == 'uEmbeds' or name == 'iEmbeds':
+    #                 skipped_layers.append(name)
+    #                 log(f" Skipping embedding: {name} (using newly created embeddings)")
+    #                 continue
+                    
+    #             if name in current_state and param.shape == current_state[name].shape:
+    #                 modified_state[name] = param.clone().detach()
+    #                 transferred_layers.append(name)
+    #                 log(f" Transferred: {name} {param.shape}")
+    #             else:
+    #                 skipped_layers.append(name)
+    #                 if name in current_state:
+    #                     log(f" Shape mismatch: {name} {param.shape} vs {current_state[name].shape}")
+    #                 else:
+    #                     log(f" Missing key: {name}")
+            
+    #         # Load the modified state into the model
+    #         self.model.load_state_dict(modified_state, strict=False)
+            
+    #         # CRITICAL: Check if torchBiAdj exists and log dimensions before reset
+    #         if hasattr(self.handler, 'torchBiAdj'):
+    #             log(f"BEFORE RESET: torchBiAdj shape = {self.handler.torchBiAdj.shape}")
+    #         else:
+    #             log(" torchBiAdj does not exist before reset")
+                
+    #         # Reset cache in handler to rebuild graph
+    #         log(" Rebuilding graph structures...")
+    #         if hasattr(self.handler, 'reset_cache_for_transfer'):
+    #             try:
+    #                 log("Calling reset_cache_for_transfer...")
+    #                 self.handler.reset_cache_for_transfer()
+    #                 log("Cache reset completed")
+    #             except Exception as e:
+    #                 log(f"ERROR in cache reset: {e}")
+    #                 import traceback
+    #                 traceback.print_exc()
+    #                 return False
+                    
+    #             # Verify adjacency dimensions immediately after reset
+    #             if hasattr(self.handler, 'torchBiAdj'):
+    #                 log(f"🔍 AFTER RESET: torchBiAdj shape = {self.handler.torchBiAdj.shape}")
+    #                 log(f"Expected dimensions: users={args.user}, items={args.item}, total={args.user+args.item}")
+                    
+    #                 # Verify dimensions match
+    #                 expected_dim = args.user + args.item
+    #                 actual_dim = self.handler.torchBiAdj.shape[0]
+    #                 if expected_dim != actual_dim:
+    #                     log(f" CRITICAL ERROR: Adjacency matrix has wrong dimensions after reset!")
+    #                     log(f"Expected {expected_dim} but got {actual_dim}")
+    #                     return False
+    #             else:
+    #                 log(" ERROR: torchBiAdj was not created during reset!")
+    #                 return False
+    #         else:
+    #             log(" ERROR: Handler has no reset_cache_for_transfer method!")
+    #             return False
+            
+    #         # Recreate all graph-related structures with new dimensions
+    #         log(" Rebuilding graph components...")
+    #         try:
+    #             # Recreate sampler with new dimensions
+    #             self.sampler = LocalGraph(self.gtLayer)
+    #             log("✓ LocalGraph sampler recreated")
+                
+    #             # Recreate masker with new dimensions
+    #             self.masker = RandomMaskSubgraphs(args.user, args.item)
+    #             log("✓ RandomMaskSubgraphs recreated")
+    #         except Exception as e:
+    #             log(f" ERROR recreating graph components: {e}")
+    #             import traceback
+    #             traceback.print_exc()
+    #             return False
+            
+    #         # Recreate distill model with correct dimensions
+    #         self.distill_model = Model(self.ResidualGTLayer).cuda()
+            
+    #         # Transfer non-embedding weights to distill model and create new embeddings
+    #         distill_state = {}
+    #         for name, param in self.model.state_dict().items():
+    #             distill_state[name] = param.clone().detach()
+            
+    #         self.distill_model.load_state_dict(distill_state)
+    #         log(" Distillation model created with same dimensions as main model")
+                    
+    #         # Run a final dimension check
+    #         self.debug_model_dimensions()
+            
+    #         log(f"Transfer learning complete: {len(transferred_layers)} layers transferred, {len(skipped_layers)} skipped")
+    #         return True
+            
+    #     except Exception as e:
+    #         log(f'Error in transfer learning: {e}')
+    #         import traceback
+    #         traceback.print_exc()
+    #         return False
+
+
+
+
+
+
+# ...existing code...
+
     def load_model_weights_for_transfer(self, weights_path):
-        """Load weights for transfer learning, handling dataset size mismatches"""
+        """Load weights for transfer learning when user/item counts differ.
+        Strategy:
+          1. Load source state.
+          2. Install fresh target-sized embeddings directly on self.model.
+          3. Filter out embedding keys from source; load only shape‑compatible layers.
+          4. Rebuild handler caches / graph structures.
+          5. Recreate distillation model mirroring main model.
+        """
         if not os.path.exists(weights_path):
             log(f'Weights file not found: {weights_path}')
             return False
-
         try:
             log(f'Loading weights for transfer learning: {weights_path}')
-            
-            # Load checkpoint
-            ckpt = torch.load(weights_path,
-                        map_location='cuda' if torch.cuda.is_available() else 'cpu',
-                        weights_only=False)
-            
-            # Extract source state dict
-            if 'model_state_dict' in ckpt:
-                source_state = ckpt['model_state_dict']
-            elif 'model' in ckpt and hasattr(ckpt['model'], 'state_dict'):
-                source_state = ckpt['model'].state_dict()
-            else:
-                source_state = ckpt
-
-            # Print source and target dimensions for debugging
-            log(f"SOURCE MODEL DIMENSIONS: users={source_state['uEmbeds'].shape[0]}, items={source_state['iEmbeds'].shape[0]}")
-            log(f"TARGET MODEL DIMENSIONS: users={args.user}, items={args.item}")
-            
-            # Get current model state
-            current_state = self.model.state_dict()
-            
-            # Create a modified state that starts with current model's state
-            modified_state = {k: v.clone() for k, v in current_state.items()}
-            transferred_layers, skipped_layers = [], []
-            
-            log(" Creating new embeddings with correct dimensions")
-            
-            # Create new user embeddings with correct dimension
-            new_uEmbeds = nn.Parameter(torch.empty(args.user, source_state['uEmbeds'].shape[1]))
-            nn.init.xavier_uniform_(new_uEmbeds)
-            
-            # Create new item embeddings with correct dimension
-            new_iEmbeds = nn.Parameter(torch.empty(args.item, source_state['iEmbeds'].shape[1]))
-            nn.init.xavier_uniform_(new_iEmbeds)
-            
-            # Replace in modified state
-            modified_state['uEmbeds'] = new_uEmbeds
-            modified_state['iEmbeds'] = new_iEmbeds
-            log(f" Created new user embeddings: {new_uEmbeds.shape}")
-            log(f"Created new item embeddings: {new_iEmbeds.shape}")
-            
-            # Transfer only compatible layers, explicitly skip embeddings
-            for name, param in source_state.items():
-                # Skip embeddings as we've already created new ones
-                if name == 'uEmbeds' or name == 'iEmbeds':
-                    skipped_layers.append(name)
-                    log(f"⚠️ Skipping embedding: {name} (using newly created embeddings)")
-                    continue
-                    
-                if name in current_state and param.shape == current_state[name].shape:
-                    modified_state[name] = param.clone().detach()
-                    transferred_layers.append(name)
-                    log(f" Transferred: {name} {param.shape}")
-                else:
-                    skipped_layers.append(name)
-                    if name in current_state:
-                        log(f"⚠️ Shape mismatch: {name} {param.shape} vs {current_state[name].shape}")
-                    else:
-                        log(f"⚠️ Missing key: {name}")
-            
-            # Load the modified state into the model
-            self.model.load_state_dict(modified_state, strict=False)
-            
-            # CRITICAL: Check if torchBiAdj exists and log dimensions before reset
-            if hasattr(self.handler, 'torchBiAdj'):
-                log(f"🔍 BEFORE RESET: torchBiAdj shape = {self.handler.torchBiAdj.shape}")
-            else:
-                log("⚠️ torchBiAdj does not exist before reset")
-                
-            # Reset cache in handler to rebuild graph
-            log(" Rebuilding graph structures...")
-            if hasattr(self.handler, 'reset_cache_for_transfer'):
-                try:
-                    log("Calling reset_cache_for_transfer...")
-                    self.handler.reset_cache_for_transfer()
-                    log("Cache reset completed")
-                except Exception as e:
-                    log(f"ERROR in cache reset: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    return False
-                    
-                # Verify adjacency dimensions immediately after reset
-                if hasattr(self.handler, 'torchBiAdj'):
-                    log(f"🔍 AFTER RESET: torchBiAdj shape = {self.handler.torchBiAdj.shape}")
-                    log(f"Expected dimensions: users={args.user}, items={args.item}, total={args.user+args.item}")
-                    
-                    # Verify dimensions match
-                    expected_dim = args.user + args.item
-                    actual_dim = self.handler.torchBiAdj.shape[0]
-                    if expected_dim != actual_dim:
-                        log(f" CRITICAL ERROR: Adjacency matrix has wrong dimensions after reset!")
-                        log(f"Expected {expected_dim} but got {actual_dim}")
-                        return False
-                else:
-                    log(" ERROR: torchBiAdj was not created during reset!")
-                    return False
-            else:
-                log(" ERROR: Handler has no reset_cache_for_transfer method!")
-                return False
-            
-            # Recreate all graph-related structures with new dimensions
-            log(" Rebuilding graph components...")
-            try:
-                # Recreate sampler with new dimensions
-                self.sampler = LocalGraph(self.gtLayer)
-                log("✓ LocalGraph sampler recreated")
-                
-                # Recreate masker with new dimensions
-                self.masker = RandomMaskSubgraphs(args.user, args.item)
-                log("✓ RandomMaskSubgraphs recreated")
-            except Exception as e:
-                log(f" ERROR recreating graph components: {e}")
-                import traceback
-                traceback.print_exc()
-                return False
-            
-            # Recreate distill model with correct dimensions
-            self.distill_model = Model(self.ResidualGTLayer).cuda()
-            
-            # Transfer non-embedding weights to distill model and create new embeddings
-            distill_state = {}
-            for name, param in self.model.state_dict().items():
-                distill_state[name] = param.clone().detach()
-            
-            self.distill_model.load_state_dict(distill_state)
-            log(" Distillation model created with same dimensions as main model")
-                    
-            # Run a final dimension check
-            self.debug_model_dimensions()
-            
-            log(f"Transfer learning complete: {len(transferred_layers)} layers transferred, {len(skipped_layers)} skipped")
-            return True
-            
+            ckpt = torch.load(
+                weights_path,
+                map_selection='cuda' if torch.cuda.is_available() else 'cpu',
+                weights_only=False
+            )
+        except TypeError:
+            # Fallback for older torch (map_selection typo safe-guard)
+            ckpt = torch.load(
+                weights_path,
+                map_location='cuda' if torch.cuda.is_available() else 'cpu',
+                weights_only=False
+            )
         except Exception as e:
-            log(f'Error in transfer learning: {e}')
-            import traceback
-            traceback.print_exc()
+            log(f'Failed to read checkpoint: {e}')
             return False
+
+        # Extract a usable state dict
+        if 'model_state_dict' in ckpt:
+            source_state = ckpt['model_state_dict']
+        elif 'model' in ckpt and hasattr(ckpt['model'], 'state_dict'):
+            source_state = ckpt['model'].state_dict()
+        else:
+            source_state = ckpt  # assume raw state dict
+
+        if 'uEmbeds' not in source_state or 'iEmbeds' not in source_state:
+            log('Source state missing embeddings; aborting transfer.')
+            return False
+
+        src_users = source_state['uEmbeds'].shape[0]
+        src_items = source_state['iEmbeds'].shape[0]
+        log(f"SOURCE MODEL DIMENSIONS: users={src_users}, items={src_items}")
+        log(f"TARGET MODEL DIMENSIONS: users={args.user}, items={args.item}")
+
+        # 1. Install fresh embeddings (target-sized) before loading anything else.
+        emb_dim_u = source_state['uEmbeds'].shape[1]
+        emb_dim_i = source_state['iEmbeds'].shape[1]
+
+        device = self.model.uEmbeds.device if hasattr(self.model, 'uEmbeds') else (
+            torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
+
+        new_u = torch.empty(args.user, emb_dim_u, device=device)
+        new_i = torch.empty(args.item, emb_dim_i, device=device)
+        nn.init.xavier_uniform_(new_u)
+        nn.init.xavier_uniform_(new_i)
+        self.model.uEmbeds = nn.Parameter(new_u)
+        self.model.iEmbeds = nn.Parameter(new_i)
+        log(f"Installed new embeddings: uEmbeds={tuple(self.model.uEmbeds.shape)}, iEmbeds={tuple(self.model.iEmbeds.shape)}")
+
+        # 2. Build filtered (non-embedding) state dict with only shape‑compatible params.
+        target_state = self.model.state_dict()
+        filtered_state = {}
+        transferred, skipped = [], []
+
+        for name, tensor in source_state.items():
+            if name in ('uEmbeds', 'iEmbeds'):
+                skipped.append(name)
+                log(f"Skipping embedding param: {name}")
+                continue
+            if name in target_state and tensor.shape == target_state[name].shape:
+                filtered_state[name] = tensor.clone().detach()
+                transferred.append(name)
+                log(f"Transferring layer: {name} {tuple(tensor.shape)}")
+            else:
+                skipped.append(name)
+                if name in target_state:
+                    log(f"Shape mismatch: {name} source {tuple(tensor.shape)} != target {tuple(target_state[name].shape)}")
+                else:
+                    log(f"Missing in target, skipping: {name}")
+
+        # 3. Load remaining weights (strict=False tolerates missing embeddings & mismatches).
+        missing, unexpected = self.model.load_state_dict(filtered_state, strict=False)
+        log(f"State dict loaded (transfer). Missing={len(missing)} Unexpected={len(unexpected)} "
+            f"Transferred={len(transferred)} Skipped={len(skipped)}")
+
+        # 4. Rebuild handler caches / adjacency with new sizes.
+        if not hasattr(self.handler, 'reset_cache_for_transfer'):
+            log("ERROR: Handler lacks reset_cache_for_transfer; cannot rebuild graph.")
+            return False
+        try:
+            log("Rebuilding graph caches via handler.reset_cache_for_transfer() ...")
+            self.handler.reset_cache_for_transfer()
+        except Exception as e:
+            log(f"ERROR during cache reset: {e}")
+            import traceback; traceback.print_exc()
+            return False
+
+        # Validate adjacency dimensions
+        expected_nodes = args.user + args.item
+        if not hasattr(self.handler, 'torchBiAdj'):
+            log("ERROR: handler.torchBiAdj missing after reset.")
+            return False
+        if self.handler.torchBiAdj.shape[0] != expected_nodes:
+            log(f"CRITICAL: Adjacency size mismatch ({self.handler.torchBiAdj.shape[0]} vs {expected_nodes})")
+            return False
+        log(f"Graph adjacency rebuilt: torchBiAdj shape={tuple(self.handler.torchBiAdj.shape)}")
+
+        # 5. Recreate sampler & masker with new dimensions
+        try:
+            self.sampler = LocalGraph(self.gtLayer)
+            self.masker = RandomMaskSubgraphs(args.user, args.item)
+            log("Graph components recreated (sampler, masker).")
+        except Exception as e:
+            log(f"ERROR recreating sampler/masker: {e}")
+            return False
+
+        # 6. Recreate distillation model aligned with main model.
+        self.distill_model = Model(self.ResidualGTLayer).cuda()
+        self.distill_model.load_state_dict(self.model.state_dict(), strict=False)
+        log("Distillation model synchronized.")
+
+        # 7. Final dimension diagnostics.
+        self.debug_model_dimensions()
+        log(f"Transfer learning complete. Layers transferred: {len(transferred)}, skipped: {len(skipped)}")
+        return True
+
+
+
+
+
+
+
 
     def debug_model_dimensions(self):
         """Debug function to check dimensions of model and graph structures"""
         log("=" * 60)
-        log("📏 DIMENSION CHECK")
+        log("DIMENSION CHECK")
         log("=" * 60)
         log(f"User count: {args.user}")
         log(f"Item count: {args.item}")

@@ -58,19 +58,19 @@ class DataHandler:
         
         try:
             trnMat = self.loadOneFile(self.trnfile)
-            log(f"  ✓ Loaded training matrix with shape {trnMat.shape}")
+            log(f" Loaded training matrix with shape {trnMat.shape}")
             
             log("  Building torchBiAdj...")
             self.torchBiAdj = self.makeTorchAdj(trnMat)
-            log(f"  ✓ Built torchBiAdj with shape {self.torchBiAdj.shape}")
+            log(f"  Built torchBiAdj with shape {self.torchBiAdj.shape}")
             
             log("  Building allOneAdj...")
             self.allOneAdj = self.makeAllOne(self.torchBiAdj)
-            log(f"  ✓ Built allOneAdj with shape {self.allOneAdj.shape}")
+            log(f" Built allOneAdj with shape {self.allOneAdj.shape}")
             
             log("  Rebuilding anchor sets...")
             self.preSelect_anchor_set()
-            log("  ✓ Anchor sets rebuilt")
+            log(" Anchor sets rebuilt")
             
             expected_dim = args.user + args.item
             actual_dim = self.torchBiAdj.shape[0]
@@ -80,7 +80,7 @@ class DataHandler:
             else:
                 log(f" DIMENSIONS MATCH: {actual_dim} nodes")
                 
-            log("🔄 CACHE RESET - COMPLETE")
+            log("CACHE RESET - COMPLETE")
             
         except Exception as e:
             log(f" ERROR during cache reset: {e}")
