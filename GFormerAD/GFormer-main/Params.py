@@ -85,6 +85,9 @@ def ParseArgs():
     parser.add_argument('--ncf_hidden', type=str, default='128,64', help='Comma-separated hidden layer sizes for NCF MLP')
     parser.add_argument('--ncf_epochs', type=int, default=3, help='Epochs for NCF fine-tune')
     parser.add_argument('--ncf_lr', type=float, default=3e-3, help='Learning rate for NCF')
+    parser.add_argument('--ortho_reg', type=float, default=0.0,
+                        help='Weight for orthogonality regularization (0 disables)')
+
 
     return parser.parse_args()
 

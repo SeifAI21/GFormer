@@ -3,8 +3,6 @@ import Utils.TimeLogger as logger
 from Utils.TimeLogger import log
 from Params import args
 
-
-
 from Model import Model, RandomMaskSubgraphs, LocalGraph, GTLayer, ResidualGTLayer
 from DataHandler import DataHandler
 import pickle
@@ -24,6 +22,14 @@ import torch
 import Utils.TimeLogger as logger
 from Utils.TimeLogger import log
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+
+
+def column_orthogonality(mat: torch.Tensor):
+    # mat: (N, D). Encourage feature (column) decorrelation: (G - I)^2 Fro norm.
+    X = mat - mat.mean(0, keepdim=True)              # center
+    G = (X.t() @ X) / (X.shape[0] + 1e-8)            # (D,D) covariance-like Gram
+    I = torch.eye(G.shape[0], device=G.device, dtype=G.dtype)
+    return (G - I).pow(2).sum()
 
 
 class Coach:
@@ -458,12 +464,19 @@ class Coach:
             clLoss = ((contrast(ancs, usrE) + contrast(poss, itmE)) * args.ssl_reg +
                       contrast(ancs, usrE, itmE) + args.ctra * contrastNCE(ancs, subLst, cList)) * temperature
             distill = (F.mse_loss(usrE,d_u)+F.mse_loss(itmE,d_i)+F.mse_loss(cList,d_c)+F.mse_loss(subLst,d_s))*self.distill_weight
-            loss = bpr1 + regLoss + clLoss + args.b2 * bpr2 + distill
+            orthoLoss = 0.0
+            if getattr(args,'ortho_reg',0.0) > 0:
+                orthoLoss = args.ortho_reg * (
+                    column_orthogonality(self.model.uEmbeds) +
+                    column_orthogonality(self.model.iEmbeds)
+                )
+            loss = bpr1 + regLoss + clLoss + args.b2 * bpr2 + distill + orthoLoss
             epLoss += loss.item(); epPre += bpr1.item()
             self.opt.zero_grad(); loss.backward()
-            nn.utils.clip_grad_norm_(self.model.parameters(),20)
+            nn.utils.clip_grad_norm_((self.model.parameters()),20)
             self.opt.step()
-            log('Step %d/%d: loss=%.3f reg=%.3f cl=%.3f temp=%.3f  ' % (i, steps, loss, regLoss, clLoss, temperature),
+            log('Step %d/%d: loss=%.3f ortho=%.3f reg=%.3f cl=%.3f temp=%.3f' %
+                (i, steps, loss, orthoLoss if getattr(args,'ortho_reg',0.0)>0 else 0, regLoss, clLoss, temperature),
                 save=False, oneline=True)
         self.distill_model.load_state_dict(self.model.state_dict())
         return {'Loss': epLoss/steps, 'preLoss': epPre/steps, 'Temperature': temperature}
@@ -491,9 +504,16 @@ class Coach:
                 bpr2 = -(scoreDiff).sigmoid().log().sum()/args.batch
                 regLoss = calcRegLoss(self.model) * args.reg
                 clLoss = (contrast(ancs, usrE)+contrast(poss,itmE))*args.ssl_reg + contrast(ancs, usrE, itmE) + args.ctra*contrastNCE(ancs, subLst, cList)
-                loss = bpr1 + regLoss + clLoss + args.b2*bpr2
+                orthoLoss = 0.0
+                if getattr(args,'ortho_reg',0.0) > 0:
+                    orthoLoss = args.ortho_reg * (
+                        column_orthogonality(self.model.uEmbeds) +
+                        column_orthogonality(self.model.iEmbeds)
+                    )
+                loss = bpr1 + regLoss + clLoss + args.b2*bpr2 + orthoLoss
                 epLoss += loss.item(); epPre += bpr1.item()
-                log('Val %d/%d: loss=%.3f reg=%.3f cl=%.3f  ' % (i, steps, loss, regLoss, clLoss),
+                log('Val %d/%d: loss=%.3f ortho=%.3f reg=%.3f cl=%.3f  ' %
+                    (i, steps, loss, orthoLoss if getattr(args,'ortho_reg',0.0)>0 else 0, regLoss, clLoss),
                     save=False, oneline=True)
         return {'Loss': epLoss/steps if steps>0 else 0, 'preLoss': epPre/steps if steps>0 else 0}
 
