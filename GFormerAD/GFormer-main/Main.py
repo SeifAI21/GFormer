@@ -339,6 +339,17 @@ class Coach:
                 self.saveHistory()
                 results.append(te)
                 if bestRes is None: bestRes = te
+                if getattr(args, 'early_stop', 0) > 0:
+                    cur = te['Recall']
+                    if not hasattr(self, '_es_best'):
+                        self._es_best = cur; self._es_wait = 0
+                    elif cur >= self._es_best + 0.0005:
+                        self._es_best = cur; self._es_wait = 0
+                    else:
+                        self._es_wait += 1
+                        if self._es_wait >= args.early_stop:
+                            log(f'Early stopping triggered (best Recall={self._es_best:.4f}) at epoch {ep}')
+                            break
             elif ep % 10 == 0:
                 self.save_checkpoint(ep, is_best=False)
         if args.epoch>0:

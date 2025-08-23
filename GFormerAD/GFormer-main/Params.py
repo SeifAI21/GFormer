@@ -38,6 +38,8 @@ def ParseArgs():
     parser.add_argument('--eps', default=0.1, type=float, help='scaled weight as reward')
     parser.add_argument('--approximate', dest='approximate', default=-1, type=int, help='k-hop shortest path distance')
     parser.add_argument('--T', type=float, default=2.0, help='Temperature for distillation')
+    parser.add_argument('--early_stop', type=int, default=0,
+                        help='Early stopping patience (0 = disabled). Uses fixed min_delta=0.0005 on Recall.')
     
     # ===== CHECKPOINTING PARAMETERS =====
     parser.add_argument('--resume', default=False, action='store_true', help='Resume from latest checkpoint')
