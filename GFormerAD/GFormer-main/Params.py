@@ -72,6 +72,17 @@ def ParseArgs():
     parser.add_argument('--min_temp', type=float, default=0.1, help='Minimum temperature for curriculum heating')
     parser.add_argument('--temp_schedule', type=str, default='linear', help='Temperature schedule: linear, exponential, or step')
 
+
+    parser.add_argument('--eval_emb_baselines', action='store_true', default=False, help='Evaluate MF/CF/NCF embedding baselines after training')
+    parser.add_argument('--mf_dim', type=int, default=32, help='MF latent dim (default=latdim if not set)')
+    parser.add_argument('--mf_epochs', type=int, default=5, help='Epochs for quick MF baseline')
+    parser.add_argument('--mf_lr', type=float, default=5e-3, help='Learning rate for MF baseline')
+    parser.add_argument('--mf_neg', type=int, default=1, help='Negatives per positive for MF/NCF BPR')
+    parser.add_argument('--baseline_batch', type=int, default=4096, help='Batch size for MF/NCF baseline training')
+    parser.add_argument('--ncf_hidden', type=str, default='128,64', help='Comma-separated hidden layer sizes for NCF MLP')
+    parser.add_argument('--ncf_epochs', type=int, default=3, help='Epochs for NCF fine-tune')
+    parser.add_argument('--ncf_lr', type=float, default=3e-3, help='Learning rate for NCF')
+
     return parser.parse_args()
 
 args = ParseArgs()

@@ -155,6 +155,10 @@ class DataHandler:
         valMat = self.loadOneFile(self.valfile)
         tstMat = self.loadOneFile(self.tstfile)
         args.user, args.item = trnMat.shape
+        self.user_items = [[] for _ in range(args.user)]
+        coo = trnMat.tocoo()
+        for u, it in zip(coo.row, coo.col):
+            self.user_items[u].append(it)
 
         # --- ADDED FOR CURRICULUM LEARNING ---
         if args.curriculum:

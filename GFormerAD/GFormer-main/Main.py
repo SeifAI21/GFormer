@@ -10,7 +10,6 @@ from Utils.Utils import contrast
 import os
 import torch.nn as nn
 import torch.nn.functional as F
-import json
 from datetime import datetime
 import numpy as np
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -24,290 +23,134 @@ class Coach:
         self.ResidualGTLayer = ResidualGTLayer()
         print('USER', args.user, 'ITEM', args.item)
         print('NUM OF INTERACTIONS', self.handler.trnLoader.dataset.__len__())
-        self.metrics = dict()
-        mets = ['Loss', 'preLoss', 'Recall', 'NDCG']
-        for met in mets:
-            self.metrics['Train' + met] = list()
-            self.metrics['Test' + met] = list()
-        
+        self.metrics = {}
+        for met in ['Loss', 'preLoss', 'Recall', 'NDCG']:
+            self.metrics['Train' + met] = []
+            self.metrics['Test' + met] = []
         self.checkpoint_dir = 'Checkpoints'
         self.best_checkpoint_dir = 'BestCheckpoints'
         self.create_checkpoint_dirs()
         self.best_recall = 0.0
         self.best_ndcg = 0.0
         self.start_epoch = 0
-        self.frozen_layers = set()  
-        self.layer_freeze_history = []  
+        self.frozen_layers = set()
 
     def get_ordered_parameters(self):
-        """Get model parameters in a logical order for percentage-based freezing"""
-        ordered_params = []
-        
-
-        ordered_params.extend([
-            ('uEmbeds', self.model.uEmbeds),
-            ('iEmbeds', self.model.iEmbeds)
-        ])
-        
-        for i, layer in enumerate(self.model.gcnLayers):
-            for name, param in layer.named_parameters():
-                ordered_params.append((f'gcnLayers.{i}.{name}', param))
-        
-        for name, param in self.model.gtLayers.named_parameters():
-            ordered_params.append((f'gtLayers.{name}', param))
-        
-        for i, layer in enumerate(self.model.pnnLayers):
-            for name, param in layer.named_parameters():
-                ordered_params.append((f'pnnLayers.{i}.{name}', param))
-        
-        return ordered_params
+        ordered = []
+        ordered.extend([('uEmbeds', self.model.uEmbeds), ('iEmbeds', self.model.iEmbeds)])
+        for i, l in enumerate(self.model.gcnLayers):
+            for n, p in l.named_parameters():
+                ordered.append((f'gcnLayers.{i}.{n}', p))
+        for n, p in self.model.gtLayers.named_parameters():
+            ordered.append((f'gtLayers.{n}', p))
+        for i, l in enumerate(self.model.pnnLayers):
+            for n, p in l.named_parameters():
+                ordered.append((f'pnnLayers.{i}.{n}', p))
+        return ordered
 
     def freeze_first_percent(self, percent):
-        """Freeze the first X% of layers (typically lower-level features)"""
-        if percent <= 0:
-            return 0
-            
-        ordered_params = self.get_ordered_parameters()
-        total_layers = len(ordered_params)
-        freeze_count = int(total_layers * percent)
-        
-        frozen_count = 0
-        log(f" Freezing first {percent*100:.1f}% of layers ({freeze_count}/{total_layers} layers)")
-        
+        if percent <= 0: return 0
+        ordered = self.get_ordered_parameters()
+        freeze_count = int(len(ordered) * percent)
         for i in range(freeze_count):
-            if i < len(ordered_params):
-                name, param = ordered_params[i]
-                param.requires_grad = False
-                self.frozen_layers.add(name)
-                frozen_count += 1
-                log(f"     Frozen: {name}")
-        
-        return frozen_count
+            name, param = ordered[i]
+            param.requires_grad = False
+            self.frozen_layers.add(name)
+            log(f'Frozen: {name}')
+        return freeze_count
 
     def freeze_last_percent(self, percent):
-        """Freeze the last X% of layers (typically higher-level features)"""
-        if percent <= 0:
-            return 0
-            
-        ordered_params = self.get_ordered_parameters()
-        total_layers = len(ordered_params)
-        freeze_count = int(total_layers * percent)
-        
-        frozen_count = 0
-        log(f"Freezing last {percent*100:.1f}% of layers ({freeze_count}/{total_layers} layers)")
-        
-        start_idx = total_layers - freeze_count
-        for i in range(start_idx, total_layers):
-            if i < len(ordered_params):
-                name, param = ordered_params[i]
-                param.requires_grad = False
-                self.frozen_layers.add(name)
-                frozen_count += 1
-                log(f"     Frozen: {name}")
-        
-        return frozen_count
+        if percent <= 0: return 0
+        ordered = self.get_ordered_parameters()
+        freeze_count = int(len(ordered) * percent)
+        for i in range(len(ordered)-freeze_count, len(ordered)):
+            name, param = ordered[i]
+            param.requires_grad = False
+            self.frozen_layers.add(name)
+            log(f'Frozen: {name}')
+        return freeze_count
 
     def freeze_backbone_keep_head(self):
-        """Freeze backbone (embeddings + GCN + GT), keep PNN trainable"""
-        frozen_count = 0
-        log(" Freezing backbone layers (Embeddings + GCN + GT), keeping PNN trainable")
-        
+        c = 0
         self.model.uEmbeds.requires_grad = False
         self.model.iEmbeds.requires_grad = False
-        self.frozen_layers.add('uEmbeds')
-        self.frozen_layers.add('iEmbeds')
-        frozen_count += 2
-        
-        for name, param in self.model.gcnLayers.named_parameters():
-            param.requires_grad = False
-            full_name = f'gcnLayers.{name}'
-            self.frozen_layers.add(full_name)
-            frozen_count += 1
-            log(f"   Frozen: {full_name}")
-        
-        for name, param in self.model.gtLayers.named_parameters():
-            param.requires_grad = False
-            full_name = f'gtLayers.{name}'
-            self.frozen_layers.add(full_name)
-            frozen_count += 1
-            log(f"     Frozen: {full_name}")
-        
-        log(f"    PNN layers kept trainable for task-specific adaptation")
-        return frozen_count
+        self.frozen_layers.update(['uEmbeds','iEmbeds'])
+        c += 2
+        for n,p in self.model.gcnLayers.named_parameters():
+            p.requires_grad = False
+            self.frozen_layers.add(f'gcnLayers.{n}')
+            c += 1
+        for n,p in self.model.gtLayers.named_parameters():
+            p.requires_grad = False
+            self.frozen_layers.add(f'gtLayers.{n}')
+            c += 1
+        return c
 
     def progressive_unfreeze_layers(self, current_epoch, total_epochs):
-        """Progressively unfreeze layers during training"""
-        if not args.progressive_unfreeze:
-            return
-        
+        if not args.progressive_unfreeze: return
         progress = current_epoch / total_epochs
-        
-        if args.unfreeze_schedule == 'linear':
-            unfreeze_ratio = progress
-        elif args.unfreeze_schedule == 'exponential':
-            unfreeze_ratio = progress ** 2
+        if args.unfreeze_schedule == 'exponential':
+            target_ratio = progress ** 2
         else:
-            unfreeze_ratio = progress
-        
-        ordered_params = self.get_ordered_parameters()
-        total_frozen = len(self.frozen_layers)
-        
-        if total_frozen == 0:
-            return
-        
-        target_unfrozen = int(total_frozen * unfreeze_ratio)
-        current_unfrozen = 0
-        
-        unfrozen_this_step = []
-        for name, param in reversed(ordered_params):
-            if name in self.frozen_layers and current_unfrozen < target_unfrozen:
+            target_ratio = progress
+        ordered = self.get_ordered_parameters()
+        frozen = [n for n in self.frozen_layers]
+        if not frozen: return
+        target_unfrozen = int(len(frozen) * target_ratio)
+        unfrozen_now = 0
+        for name, param in reversed(ordered):
+            if name in self.frozen_layers and unfrozen_now < target_unfrozen:
                 param.requires_grad = True
                 self.frozen_layers.remove(name)
-                unfrozen_this_step.append(name)
-                current_unfrozen += 1
-        
-        if unfrozen_this_step:
-            log(f"Progressive unfreezing at epoch {current_epoch} ({progress*100:.1f}% progress):")
-            for name in unfrozen_this_step:
-                log(f"Unfrozen: {name}")
-            
+                unfrozen_now += 1
+        if unfrozen_now > 0:
             self.update_optimizer_for_unfrozen_layers()
+            log(f'Progressive unfreeze epoch {current_epoch}: {unfrozen_now} layers')
 
     def update_optimizer_for_unfrozen_layers(self):
-        """Update optimizer when layers are unfrozen during training"""
-        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        
-        if args.fine_tune_lr is not None:
-            lr = args.fine_tune_lr
-        else:
-            lr = args.lr
-        
+        trainable = [p for p in self.model.parameters() if p.requires_grad]
+        base_lr = args.fine_tune_lr if getattr(args, 'fine_tune_lr', None) is not None else args.lr
         if hasattr(args, 'frozen_lr_scale'):
-            lr_scaled = lr * args.frozen_lr_scale
-        else:
-            lr_scaled = lr
-        
-        self.opt = torch.optim.Adam(trainable_params, lr=lr_scaled, weight_decay=0)
-        log(f" Optimizer updated with LR={lr_scaled:.6f} for newly unfrozen layers")
+            base_lr *= args.frozen_lr_scale
+        self.opt = torch.optim.Adam(trainable, lr=base_lr, weight_decay=0)
 
     def apply_freezing_strategy(self):
-        """Apply the specified freezing strategy"""
-        total_params = sum(p.numel() for p in self.model.parameters())
-        frozen_count = 0
-        
-        log("=" * 60)
-        log(" APPLYING FREEZING STRATEGY")
-        log("=" * 60)
-        
         if args.freeze_first_percent > 0:
-            frozen_count += self.freeze_first_percent(args.freeze_first_percent)
-        
+            self.freeze_first_percent(args.freeze_first_percent)
         if args.freeze_last_percent > 0:
-            frozen_count += self.freeze_last_percent(args.freeze_last_percent)
-        
+            self.freeze_last_percent(args.freeze_last_percent)
         if args.freeze_embeddings:
             self.model.uEmbeds.requires_grad = False
             self.model.iEmbeds.requires_grad = False
-            self.frozen_layers.add('uEmbeds')
-            self.frozen_layers.add('iEmbeds')
-            frozen_count += 2
-            log("Embeddings frozen")
-        
+            self.frozen_layers.update(['uEmbeds','iEmbeds'])
         if args.freeze_backbone:
-            frozen_count += self.freeze_backbone_keep_head()
-        
-        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        frozen_params = total_params - trainable_params
-        
-        log("=" * 60)
-        log(" FREEZING SUMMARY")
-        log("=" * 60)
-        log(f"Total parameters: {total_params:,}")
-        log(f"Frozen parameters: {frozen_params:,} ({frozen_params/total_params*100:.2f}%)")
-        log(f"Trainable parameters: {trainable_params:,} ({trainable_params/total_params*100:.2f}%)")
-        log(f"Frozen layers: {len(self.frozen_layers)}")
-        
-        if hasattr(args, 'progressive_unfreeze') and args.progressive_unfreeze:
-            log(f"Progressive unfreezing enabled ({getattr(args, 'unfreeze_schedule', 'linear')} schedule)")
-        
-        self.log_component_status()
-        
-        return trainable_params, frozen_params
-
-    def log_component_status(self):
-        """Log the status of each component"""
-        log("COMPONENT STATUS:")
-        
-        if self.model.uEmbeds.requires_grad or self.model.iEmbeds.requires_grad:
-            log("  Embeddings: Trainable")
-        else:
-            log("  Embeddings: Frozen")
-        
-        gcn_trainable = any(p.requires_grad for p in self.model.gcnLayers.parameters())
-        if gcn_trainable:
-            trainable_gcn = sum(1 for p in self.model.gcnLayers.parameters() if p.requires_grad)
-            total_gcn = sum(1 for p in self.model.gcnLayers.parameters())
-            log(f" GCN Layers: {trainable_gcn}/{total_gcn} trainable")
-        else:
-            log(" GCN Layers: Frozen")
-        
-        gt_trainable = any(p.requires_grad for p in self.model.gtLayers.parameters())
-        if gt_trainable:
-            trainable_gt = sum(1 for p in self.model.gtLayers.parameters() if p.requires_grad)
-            total_gt = sum(1 for p in self.model.gtLayers.parameters())
-            log(f"GT Layers: {trainable_gt}/{total_gt} trainable")
-        else:
-            log("GT Layers: Frozen")
-        
-        pnn_trainable = any(p.requires_grad for p in self.model.pnnLayers.parameters())
-        if pnn_trainable:
-            trainable_pnn = sum(1 for p in self.model.pnnLayers.parameters() if p.requires_grad)
-            total_pnn = sum(1 for p in self.model.pnnLayers.parameters())
-            log(f"  PNN Layers: {trainable_pnn}/{total_pnn} trainable")
-        else:
-            log("   PNN Layers: Frozen")
+            self.freeze_backbone_keep_head()
+        log(f'Frozen layers: {len(self.frozen_layers)}')
 
     def setup_fine_tuning_optimizer(self):
-        """Setup optimizer for fine-tuning with appropriate learning rates"""
-        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        
-        if hasattr(args, 'fine_tune_lr') and args.fine_tune_lr is not None:
-            lr = args.fine_tune_lr
-            log(f"Using fine-tuning learning rate: {lr}")
-        else:
-            lr = args.lr
-            log(f"Using standard learning rate: {lr}")
-        
-        self.opt = torch.optim.Adam(trainable_params, lr=lr, weight_decay=0)
-        
-        log(f" Optimizer created with {len(trainable_params):,} trainable parameters")
+        trainable = [p for p in self.model.parameters() if p.requires_grad]
+        lr = args.fine_tune_lr if getattr(args,'fine_tune_lr',None) is not None else args.lr
+        self.opt = torch.optim.Adam(trainable, lr=lr, weight_decay=0)
 
     def prepareModel(self):
         self.gtLayer = GTLayer().cuda()
         self.model = Model(self.ResidualGTLayer).cuda()
         self.distill_model = Model(self.ResidualGTLayer).cuda()
-        
-        if (hasattr(args, 'freeze_first_percent') and args.freeze_first_percent > 0) or \
-           (hasattr(args, 'freeze_last_percent') and args.freeze_last_percent > 0) or \
-           (hasattr(args, 'freeze_embeddings') and args.freeze_embeddings) or \
-           (hasattr(args, 'freeze_backbone') and args.freeze_backbone):
+        if (args.freeze_first_percent>0 or args.freeze_last_percent>0 or
+            args.freeze_embeddings or args.freeze_backbone):
             self.apply_freezing_strategy()
-        
         self.setup_fine_tuning_optimizer()
-        
         self.masker = RandomMaskSubgraphs(args.user, args.item)
         self.sampler = LocalGraph(self.gtLayer)
 
     def create_checkpoint_dirs(self):
-        """Create checkpoint directories if they don't exist"""
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         os.makedirs(self.best_checkpoint_dir, exist_ok=True)
         os.makedirs('Models', exist_ok=True)
         os.makedirs('History', exist_ok=True)
 
     def save_checkpoint(self, epoch, is_best=False, is_final=False):
-        """Save comprehensive checkpoint"""
-        checkpoint = {
+        ckp = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'distill_model_state_dict': self.distill_model.state_dict(),
@@ -319,960 +162,518 @@ class Coach:
             'args': vars(args),
             'timestamp': datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         }
-        
-        if is_final:
-            checkpoint_path = os.path.join(self.checkpoint_dir, f'final_checkpoint.pth')
-        else:
-            checkpoint_path = os.path.join(self.checkpoint_dir, f'checkpoint_epoch_{epoch}.pth')
-        
-        torch.save(checkpoint, checkpoint_path)
-        log(f'Checkpoint saved: {checkpoint_path}')
-        
+        path = os.path.join(self.checkpoint_dir,
+                            'final_checkpoint.pth' if is_final else f'checkpoint_epoch_{epoch}.pth')
+        torch.save(ckp, path)
         if is_best:
-            best_checkpoint_path = os.path.join(self.best_checkpoint_dir, f'best_checkpoint_epoch_{epoch}.pth')
-            torch.save(checkpoint, best_checkpoint_path)
-            log(f'Best checkpoint saved: {best_checkpoint_path}')
-        
-        latest_checkpoint_path = os.path.join(self.checkpoint_dir, 'latest_checkpoint.pth')
-        torch.save(checkpoint, latest_checkpoint_path)
-        
-        if hasattr(args, 'keep_checkpoints'):
-            self.cleanup_old_checkpoints(keep_last=args.keep_checkpoints)
-        else:
-            self.cleanup_old_checkpoints(keep_last=5)
+            torch.save(ckp, os.path.join(self.best_checkpoint_dir, f'best_checkpoint_epoch_{epoch}.pth'))
+        torch.save(ckp, os.path.join(self.checkpoint_dir, 'latest_checkpoint.pth'))
+        self.cleanup_old_checkpoints(keep_last=getattr(args,'keep_checkpoints',5))
 
     def cleanup_old_checkpoints(self, keep_last=5):
-        """Remove old checkpoints to save disk space"""
         try:
-            checkpoint_files = [f for f in os.listdir(self.checkpoint_dir) 
-                              if f.startswith('checkpoint_epoch_') and f.endswith('.pth')]
-            
-            if len(checkpoint_files) > keep_last:
-                checkpoint_files.sort(key=lambda x: int(x.split('_')[2].split('.')[0]))
-                
-                for old_file in checkpoint_files[:-keep_last]:
-                    old_path = os.path.join(self.checkpoint_dir, old_file)
-                    os.remove(old_path)
-                    log(f'Removed old checkpoint: {old_file}')
+            files = [f for f in os.listdir(self.checkpoint_dir) if f.startswith('checkpoint_epoch_')]
+            files.sort(key=lambda x: int(x.split('_')[2].split('.')[0]))
+            for f in files[:-keep_last]:
+                os.remove(os.path.join(self.checkpoint_dir,f))
         except Exception as e:
-            log(f'Error cleaning up checkpoints: {e}')
+            log(f'Cleanup error: {e}')
 
     def load_checkpoint(self, checkpoint_path=None, load_best=False):
-        """Load checkpoint from file - UPDATED FOR EVALUATION MODE"""
         if checkpoint_path is None:
             if load_best:
-                if not os.path.exists(self.best_checkpoint_dir):
-                    log('Best checkpoint directory does not exist')
-                    return False
-                    
-                best_files = [f for f in os.listdir(self.best_checkpoint_dir) 
-                            if f.startswith('best_checkpoint_') and f.endswith('.pth')]
-                if best_files:
-                    best_files.sort(key=lambda x: int(x.split('_')[3].split('.')[0]), reverse=True)
-                    checkpoint_path = os.path.join(self.best_checkpoint_dir, best_files[0])
-                else:
-                    log('No best checkpoint found')
-                    return False
+                files = []
+                if os.path.exists(self.best_checkpoint_dir):
+                    files = [f for f in os.listdir(self.best_checkpoint_dir) if f.startswith('best_checkpoint_')]
+                if not files: return False
+                files.sort(key=lambda x: int(x.split('_')[3].split('.')[0]), reverse=True)
+                checkpoint_path = os.path.join(self.best_checkpoint_dir, files[0])
             else:
-                checkpoint_path = os.path.join(self.checkpoint_dir, 'latest_checkpoint.pth')
-        
-        if not os.path.exists(checkpoint_path):
-            log(f'Checkpoint not found: {checkpoint_path}')
-            return False
-        
+                checkpoint_path = os.path.join(self.checkpoint_dir,'latest_checkpoint.pth')
+        if not os.path.exists(checkpoint_path): return False
         try:
-            checkpoint = torch.load(checkpoint_path, 
-                                map_location='cuda' if torch.cuda.is_available() else 'cpu',
-                                weights_only=False)
-            
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-            self.distill_model.load_state_dict(checkpoint['distill_model_state_dict'])
-            self.gtLayer.load_state_dict(checkpoint['gtLayer_state_dict'])
-            
-            if args.epoch > 0:
-                self.opt.load_state_dict(checkpoint['optimizer_state_dict'])
-                log('Optimizer state loaded for training')
-            else:
-                log('Optimizer state skipped for evaluation-only mode')
-            
-            self.metrics = checkpoint['metrics']
-            self.best_recall = checkpoint.get('best_recall', 0.0)
-            self.best_ndcg = checkpoint.get('best_ndcg', 0.0)
-            self.start_epoch = checkpoint['epoch'] + 1
-            
-            log(f'Checkpoint loaded: {checkpoint_path}')
-            log(f'Original epoch: {checkpoint["epoch"]}')
-            log(f'Best Recall in checkpoint: {self.best_recall:.4f}')
-            log(f'Best NDCG in checkpoint: {self.best_ndcg:.4f}')
-            
-            if args.epoch == 0:
-                self.model.eval()
-                self.distill_model.eval()
-                log('Models set to evaluation mode')
-            else:
-                self.model.train()
-                self.distill_model.train()
-                log('Models set to training mode')
-            
+            ckp = torch.load(checkpoint_path, map_location='cuda' if torch.cuda.is_available() else 'cpu', weights_only=False)
+            self.model.load_state_dict(ckp['model_state_dict'])
+            self.distill_model.load_state_dict(ckp['distill_model_state_dict'])
+            self.gtLayer.load_state_dict(ckp['gtLayer_state_dict'])
+            if args.epoch>0:
+                self.opt.load_state_dict(ckp['optimizer_state_dict'])
+            self.metrics = ckp['metrics']
+            self.best_recall = ckp.get('best_recall',0.0)
+            self.best_ndcg = ckp.get('best_ndcg',0.0)
+            self.start_epoch = ckp['epoch'] + 1
             return True
-            
         except Exception as e:
-            log(f'Error loading checkpoint: {e}')
+            log(f'Load checkpoint error: {e}')
             return False
 
     def save_model_weights(self, epoch, suffix=''):
-        """Save only model weights (lighter than full checkpoint)"""
-        weights = {
-            'model_state_dict': self.model.state_dict(),
-            'epoch': epoch,
-            'timestamp': datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        }
-        
-        weights_path = os.path.join('Models', f'weights_epoch_{epoch}{suffix}.pth')
-        torch.save(weights, weights_path)
-        log(f'Model weights saved: {weights_path}')
+        torch.save({'model_state_dict': self.model.state_dict(),
+                    'epoch': epoch,
+                    'timestamp': datetime.now().strftime('%Y-%m-%d_%H-%M-%S')},
+                   os.path.join('Models', f'weights_epoch_{epoch}{suffix}.pth'))
 
-    def load_model_weights(self, weights_path):
-        """Enhanced model weights loading for evaluation"""
-        if not os.path.exists(weights_path):
-            log(f'Weights file not found: {weights_path}')
-            return False
-        
+    def load_model_weights(self, path):
+        if not os.path.exists(path): return False
         try:
-            file_ext = weights_path.split('.')[-1].lower()
-            log(f'Loading weights file with extension: .{file_ext}')
-            
-            weights = torch.load(weights_path, 
-                            map_location='cuda' if torch.cuda.is_available() else 'cpu',
-                            weights_only=False)
-            
-            if file_ext == 'mod':
-                if 'model' in weights:
-                    log('Loading .mod file with model object')
-                    loaded_model = weights['model']
-                    
-                    self.model.load_state_dict(loaded_model.state_dict())
-                    log('Model state dict loaded from .mod file')
-                    
-                else:
-                    log('Invalid .mod file format - no model key found')
-                    return False
-                    
+            w = torch.load(path, map_location='cuda' if torch.cuda.is_available() else 'cpu', weights_only=False)
+            if 'model_state_dict' in w:
+                self.model.load_state_dict(w['model_state_dict'])
+            elif 'model' in w and hasattr(w['model'],'state_dict'):
+                self.model.load_state_dict(w['model'].state_dict())
             else:
-                if 'model_state_dict' in weights:
-                    # Standard checkpoint format
-                    self.model.load_state_dict(weights['model_state_dict'])
-                    log('Model state dict loaded from checkpoint')
-                    
-                elif 'model' in weights:
-                    if hasattr(weights['model'], 'state_dict'):
-                        self.model.load_state_dict(weights['model'].state_dict())
-                        log('Model state dict loaded from nested model')
-                    else:
-                        self.model = weights['model']
-                        log('Entire model object loaded')
-                        
-                else:
-                    self.model.load_state_dict(weights)
-                    log('Direct state dict loaded')
-            
+                self.model.load_state_dict(w)
             self.distill_model.load_state_dict(self.model.state_dict())
-            log('Distillation model synchronized with main model')
-            
             self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
-            log('Optimizer recreated with loaded model parameters')
-            
-            log(f'Model weights loaded successfully: {weights_path}')
             return True
-            
         except Exception as e:
-            log(f'Error loading weights: {e}')
-            log('Trying alternative loading method...')
-            
-            try:
-                return self.load_legacy_model(weights_path)
-            except Exception as e2:
-                log(f'Legacy loading also failed: {e2}')
-                return False
-
-    def load_legacy_model(self, weights_path):
-        """Load legacy .mod format models"""
-        try:
-            log('Attempting legacy model loading...')
-            ckp = torch.load(weights_path, weights_only=False)
-            
-            if 'model' in ckp:
-                self.model = ckp['model']
-                
-                self.distill_model = Model(self.ResidualGTLayer).cuda()
-                self.distill_model.load_state_dict(self.model.state_dict())
-                
-                self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
-                
-                log('Legacy model loaded successfully')
-                return True
-            else:
-                log('No model found in legacy file')
-                return False
-                
-        except Exception as e:
-            log(f'Legacy loading failed: {e}')
+            log(f'Load weights error: {e}')
             return False
 
-    def load_model_weights_for_transfer(self, weights_path):
-        """Load weights for transfer learning, handling dataset size mismatches"""
-        if not os.path.exists(weights_path):
-            log(f'Weights file not found: {weights_path}')
-            return False
-
+    def load_model_weights_for_transfer(self, path):
+        if not os.path.exists(path): return False
         try:
-            log(f'Loading weights for transfer learning: {weights_path}')
-            
-            ckpt = torch.load(weights_path,
-                        map_location='cuda' if torch.cuda.is_available() else 'cpu',
-                        weights_only=False)
-            
+            ckpt = torch.load(path, map_location='cuda' if torch.cuda.is_available() else 'cpu', weights_only=False)
             if 'model_state_dict' in ckpt:
-                source_state = ckpt['model_state_dict']
-            elif 'model' in ckpt and hasattr(ckpt['model'], 'state_dict'):
-                source_state = ckpt['model'].state_dict()
+                source = ckpt['model_state_dict']
+            elif 'model' in ckpt and hasattr(ckpt['model'],'state_dict'):
+                source = ckpt['model'].state_dict()
             else:
-                source_state = ckpt
-
-            log(f"SOURCE MODEL DIMENSIONS: users={source_state['uEmbeds'].shape[0]}, items={source_state['iEmbeds'].shape[0]}")
-            log(f"TARGET MODEL DIMENSIONS: users={args.user}, items={args.item}")
-            
-            current_state = self.model.state_dict()
-            
-            modified_state = {k: v.clone() for k, v in current_state.items()}
-            transferred_layers, skipped_layers = [], []
-            
-            log(" Creating new embeddings with correct dimensions")
-            
-            new_uEmbeds = nn.Parameter(torch.empty(args.user, source_state['uEmbeds'].shape[1]))
-            nn.init.xavier_uniform_(new_uEmbeds)
-            
-            new_iEmbeds = nn.Parameter(torch.empty(args.item, source_state['iEmbeds'].shape[1]))
-            nn.init.xavier_uniform_(new_iEmbeds)
-            
-            modified_state['uEmbeds'] = new_uEmbeds
-            modified_state['iEmbeds'] = new_iEmbeds
-            log(f" Created new user embeddings: {new_uEmbeds.shape}")
-            log(f"Created new item embeddings: {new_iEmbeds.shape}")
-            
-            for name, param in source_state.items():
-                if name == 'uEmbeds' or name == 'iEmbeds':
-                    skipped_layers.append(name)
-                    log(f" Skipping embedding: {name} (using newly created embeddings)")
-                    continue
-                    
-                if name in current_state and param.shape == current_state[name].shape:
-                    modified_state[name] = param.clone().detach()
-                    transferred_layers.append(name)
-                    log(f" Transferred: {name} {param.shape}")
-                else:
-                    skipped_layers.append(name)
-                    if name in current_state:
-                        log(f" Shape mismatch: {name} {param.shape} vs {current_state[name].shape}")
-                    else:
-                        log(f" Missing key: {name}")
-            
-            self.model.load_state_dict(modified_state, strict=False)
-            
-            if hasattr(self.handler, 'torchBiAdj'):
-                log(f"BEFORE RESET: torchBiAdj shape = {self.handler.torchBiAdj.shape}")
-            else:
-                log(" torchBiAdj does not exist before reset")
-                
-            log(" Rebuilding graph structures...")
-            if hasattr(self.handler, 'reset_cache_for_transfer'):
-                try:
-                    log("Calling reset_cache_for_transfer...")
-                    self.handler.reset_cache_for_transfer()
-                    log("Cache reset completed")
-                except Exception as e:
-                    log(f"ERROR in cache reset: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    return False
-                    
-                if hasattr(self.handler, 'torchBiAdj'):
-                    log(f"AFTER RESET: torchBiAdj shape = {self.handler.torchBiAdj.shape}")
-                    log(f"Expected dimensions: users={args.user}, items={args.item}, total={args.user+args.item}")
-                    
-                    expected_dim = args.user + args.item
-                    actual_dim = self.handler.torchBiAdj.shape[0]
-                    if expected_dim != actual_dim:
-                        log(f" CRITICAL ERROR: Adjacency matrix has wrong dimensions after reset")
-                        log(f"Expected {expected_dim} but got {actual_dim}")
-                        return False
-                else:
-                    log(" ERROR: torchBiAdj was not created during reset")
-                    return False
-            else:
-                log(" ERROR: Handler has no reset_cache_for_transfer method")
-                return False
-            
-            log(" Rebuilding graph components")
-            try:
-                self.sampler = LocalGraph(self.gtLayer)
-                log(" LocalGraph sampler recreated")
-                
-                self.masker = RandomMaskSubgraphs(args.user, args.item)
-                log(" RandomMaskSubgraphs recreated")
-            except Exception as e:
-                log(f" ERROR recreating graph components: {e}")
-                import traceback
-                traceback.print_exc()
-                return False
-            
-            self.distill_model = Model(self.ResidualGTLayer).cuda()
-            
-            distill_state = {}
-            for name, param in self.model.state_dict().items():
-                distill_state[name] = param.clone().detach()
-            
-            self.distill_model.load_state_dict(distill_state)
-            log(" Distillation model created with same dimensions as main model")
-                    
-            self.debug_model_dimensions()
-            
-            log(f"Transfer learning complete: {len(transferred_layers)} layers transferred, {len(skipped_layers)} skipped")
+                source = ckpt
+            cur = self.model.state_dict()
+            new_state = {k:v.clone() for k,v in cur.items()}
+            new_u = nn.Parameter(torch.empty(args.user, source['uEmbeds'].shape[1])); nn.init.xavier_uniform_(new_u)
+            new_i = nn.Parameter(torch.empty(args.item, source['iEmbeds'].shape[1])); nn.init.xavier_uniform_(new_i)
+            new_state['uEmbeds'] = new_u
+            new_state['iEmbeds'] = new_i
+            for k,v in source.items():
+                if k in ['uEmbeds','iEmbeds']: continue
+                if k in cur and v.shape == cur[k].shape:
+                    new_state[k] = v.clone()
+            self.model.load_state_dict(new_state, strict=False)
+            self.distill_model.load_state_dict(self.model.state_dict())
             return True
-            
         except Exception as e:
-            log(f'Error in transfer learning: {e}')
-            import traceback
-            traceback.print_exc()
+            log(f'Transfer load error: {e}')
             return False
 
     def debug_model_dimensions(self):
-        """Debug function to check dimensions of model and graph structures"""
-        log("=" * 60)
-        log("DIMENSION CHECK")
-        log("=" * 60)
-        log(f"User count: {args.user}")
-        log(f"Item count: {args.item}")
-        log(f"Total nodes: {args.user + args.item}")
-        
-        if hasattr(self.model, 'uEmbeds'):
-            log(f"Model uEmbeds shape: {self.model.uEmbeds.shape}")
-            if self.model.uEmbeds.shape[0] != args.user:
-                log(f" USER EMBEDDING MISMATCH: {self.model.uEmbeds.shape[0]} vs {args.user}")
-        else:
-            log("Model missing uEmbeds!")
-            
-        if hasattr(self.model, 'iEmbeds'):
-            log(f"Model iEmbeds shape: {self.model.iEmbeds.shape}")
-            if self.model.iEmbeds.shape[0] != args.item:
-                log(f" ITEM EMBEDDING MISMATCH: {self.model.iEmbeds.shape[0]} vs {args.item}")
-        else:
-            log(" Model missing iEmbeds!")
-        
-        if hasattr(self.handler, 'torchBiAdj'):
-            log(f"torchBiAdj shape: {self.handler.torchBiAdj.shape}")
-            if self.handler.torchBiAdj.shape[0] != args.user + args.item:
-                log(f" ADJACENCY MISMATCH: {self.handler.torchBiAdj.shape[0]} vs {args.user + args.item}")
-        else:
-            log(" Missing torchBiAdj!")
-            
-        if hasattr(self.handler, 'allOneAdj'):
-            log(f"allOneAdj shape: {self.handler.allOneAdj.shape}")
-        else:
-            log(" Missing allOneAdj!")
-        
-        if hasattr(self.model, 'uEmbeds') and hasattr(self.model, 'iEmbeds') and hasattr(self.handler, 'torchBiAdj'):
-            total_embed_size = self.model.uEmbeds.shape[0] + self.model.iEmbeds.shape[0]
-            adj_size = self.handler.torchBiAdj.shape[0]
-            
-            if total_embed_size == adj_size:
-                log(" DIMENSIONS MATCH - Training should work!")
-            else:
-                log(f" CRITICAL MISMATCH: Embeddings ({total_embed_size}) vs Adjacency ({adj_size})")
-        
-        log("=" * 60)
+        log(f'uEmbeds: {getattr(self.model,"uEmbeds",None).shape if hasattr(self.model,"uEmbeds") else "NA"}')
+        log(f'iEmbeds: {getattr(self.model,"iEmbeds",None).shape if hasattr(self.model,"iEmbeds") else "NA"}')
+        if hasattr(self.handler,'torchBiAdj'):
+            log(f'Adj shape: {self.handler.torchBiAdj.shape}')
 
-    def makePrint(self, name, ep, reses, save, total_epochs=None):
-        if total_epochs is not None:
-            ret = 'Epoch %d/%d, %s: ' % (ep, total_epochs, name)
-        else:
-            ret = 'Epoch %d/%d, %s: ' % (ep, args.epoch, name)
-        for metric in reses:
-            val = reses[metric]
-            ret += '%s = %.4f, ' % (metric, val)
-            tem = name + metric
-            if save and tem in self.metrics:
-                self.metrics[tem].append(val)
-        ret = ret[:-2] + '  '
-        return ret
+    def makePrint(self, name, ep, res, save, total_epochs=None):
+        total = total_epochs if total_epochs is not None else args.epoch
+        out = f'Epoch {ep}/{total}, {name}: '
+        for k,v in res.items():
+            out += f'{k} = {v:.4f}, '
+            key = name + k
+            if save and key in self.metrics:
+                self.metrics[key].append(v)
+        return out[:-2]
 
     def run_with_curriculum(self):
-        """Run training with curriculum learning schedule."""
-        log("Starting training with Curriculum Learning...")
-
         try:
-            data_fractions = [float(f) for f in args.curriculum_schedule.split(',')]
-            stage_epochs = [int(e) for e in args.curriculum_epochs.split(',')]
-            if len(data_fractions) != len(stage_epochs):
-                log("ERROR: Curriculum schedule and epochs must have the same number of stages.")
-                return
-        except Exception as e:
-            log(f"ERROR: Could not parse curriculum arguments: {e}")
+            fracs = [float(f) for f in args.curriculum_schedule.split(',')]
+            stages = [int(e) for e in args.curriculum_epochs.split(',')]
+            if len(fracs)!=len(stages): return
+        except:
             return
-
-        total_epochs = sum(stage_epochs)
-        global_epoch = self.start_epoch
+        total_epochs = sum(stages)
+        g_ep = self.start_epoch
         bestRes = None
-        result = []
-
-        for stage_idx, data_fraction in enumerate(data_fractions):
-            epochs_in_stage = stage_epochs[stage_idx]
-            log("=" * 60)
-            log(f"CURRICULUM STAGE {stage_idx + 1}/{len(data_fractions)}")
-            log(f"  Data Fraction: {data_fraction * 100:.0f}%")
-            log(f"  Epochs in this stage: {epochs_in_stage}")
-            log("=" * 60)
-
-            self.handler.trnLoader = self.handler.get_curriculum_loader(data_fraction)
-
-            for stage_epoch in range(epochs_in_stage):
-                if global_epoch >= total_epochs:
-                    break
-                
-                self.current_epoch = global_epoch
-                
-                self.model.train()
-                self.distill_model.train()
-
-                try:
-                    train_res = self.trainEpoch()
-                    log(self.makePrint(f'Train (Stage {stage_idx+1})', global_epoch, train_res, True, total_epochs))
-                except Exception as e:
-                    log(f"Training error at epoch {global_epoch}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    break
-
-                if global_epoch % args.tstEpoch == 0:
-                    self.model.eval()
-                    self.distill_model.eval()
-                    
-                    try:
-                        val_res = self.valEpoch()
-                        log(self.makePrint('Validation', global_epoch, val_res, True, total_epochs))
-                        
-                        test_res = self.testEpoch()
-                        log(self.makePrint('Test', global_epoch, test_res, True, total_epochs))
-
-                        is_best = test_res['Recall'] > self.best_recall
-                        if is_best:
-                            self.best_recall = test_res['Recall']
-                            self.best_ndcg = test_res['NDCG']
-                            bestRes = test_res
-                        
-                        self.save_checkpoint(global_epoch, is_best=is_best)
-                        
-                        if global_epoch % (args.tstEpoch * 2) == 0:
-                            self.save_model_weights(global_epoch, '_curriculum')
-                        
-                        self.saveHistory()
-                        result.append(test_res)
-                        
-                    except Exception as e:
-                        log(f"Testing error at epoch {global_epoch}: {e}")
-                        import traceback
-                        traceback.print_exc()
-
-                elif global_epoch % 10 == 0:
-                    self.save_checkpoint(global_epoch, is_best=False)
-
-                global_epoch += 1
-                print()
-
-        try:
-            self.model.eval()
-            self.distill_model.eval()
-            
-            final_res = self.testEpoch()
-            result.append(final_res)
-            
-            self.save_checkpoint(total_epochs - 1, is_final=True)
-            torch.save(result, f"Curriculum_result_{args.data}.pkl")
-            
-            log(self.makePrint('Final Test', total_epochs, final_res, True, total_epochs))
-            
-            if bestRes is not None:
-                log(self.makePrint('Best Result', total_epochs, bestRes, True, total_epochs))
-            
-            self.saveHistory()
-            
-        except Exception as e:
-            log(f"Final evaluation error: {e}")
-            import traceback
-            traceback.print_exc()
-
-        log("Curriculum training complete.")
+        results = []
+        for si,f in enumerate(fracs):
+            self.handler.trnLoader = self.handler.get_curriculum_loader(f)
+            for _ in range(stages[si]):
+                if g_ep >= total_epochs: break
+                self.current_epoch = g_ep
+                self.model.train(); self.distill_model.train()
+                tr = self.trainEpoch()
+                log(self.makePrint(f'Train(Stage{si+1})', g_ep, tr, True, total_epochs))
+                if g_ep % args.tstEpoch == 0:
+                    self.model.eval(); self.distill_model.eval()
+                    vr = self.valEpoch()
+                    log(self.makePrint('Validation', g_ep, vr, True, total_epochs))
+                    te = self.testEpoch()
+                    log(self.makePrint('Test', g_ep, te, True, total_epochs))
+                    if te['Recall'] > self.best_recall:
+                        self.best_recall = te['Recall']; self.best_ndcg = te['NDCG']; bestRes = te
+                    self.save_checkpoint(g_ep, is_best=(te==bestRes))
+                    if g_ep % (args.tstEpoch*2)==0:
+                        self.save_model_weights(g_ep,'_curriculum')
+                    self.saveHistory()
+                    results.append(te)
+                elif g_ep % 10 == 0:
+                    self.save_checkpoint(g_ep, is_best=False)
+                g_ep += 1
+        self.model.eval(); self.distill_model.eval()
+        final = self.testEpoch()
+        results.append(final)
+        self.save_checkpoint(total_epochs-1, is_final=True)
+        torch.save(results, f'Curriculum_result_{args.data}.pkl')
+        log(self.makePrint('Final Test', total_epochs, final, True, total_epochs))
+        if bestRes:
+            log(self.makePrint('Best Result', total_epochs, bestRes, True, total_epochs))
+        self.saveHistory()
 
     def run_standard_training(self):
-        """Run standard training loop (the original training logic)."""
-        log(f"Starting standard training for {args.epoch} epochs...")
         bestRes = None
-        result = []
-        
+        results = []
         for ep in range(self.start_epoch, args.epoch):
             self.current_epoch = ep
-            
-            self.model.train()
-            self.distill_model.train()
-            
+            self.model.train(); self.distill_model.train()
             tstFlag = (ep % args.tstEpoch == 0)
-            
-            try:
-                reses = self.trainEpoch()
-                log(self.makePrint('Train', ep, reses, tstFlag))
-            except Exception as e:
-                log(f"Training error at epoch {ep}: {e}")
-                import traceback
-                traceback.print_exc()
-                break
-            
+            tr = self.trainEpoch()
+            log(self.makePrint('Train', ep, tr, tstFlag))
             if tstFlag:
-                self.model.eval()
-                self.distill_model.eval()
-                
-                try:
-                    reses = self.valEpoch()
-                    log(self.makePrint('Validation', ep, reses, tstFlag))
-            
-                    reses = self.testEpoch()
-                    log(self.makePrint('Test', ep, reses, tstFlag))
-                    
-                    is_best = reses['Recall'] > self.best_recall
-                    if is_best:
-                        self.best_recall = reses['Recall']
-                        self.best_ndcg = reses['NDCG']
-                        bestRes = reses
-                    
-                    self.save_checkpoint(ep, is_best=is_best)
-                    
-                    if ep % (args.tstEpoch * 2) == 0:
-                        self.save_model_weights(ep, '_standard')
-                    
-                    self.saveHistory()
-                    result.append(reses)
-                    
-                    if bestRes is None:
-                        bestRes = reses
-                        
-                except Exception as e:
-                    log(f"Testing error at epoch {ep}: {e}")
-                    import traceback
-                    traceback.print_exc()
-            
+                self.model.eval(); self.distill_model.eval()
+                vr = self.valEpoch(); log(self.makePrint('Validation', ep, vr, tstFlag))
+                te = self.testEpoch(); log(self.makePrint('Test', ep, te, tstFlag))
+                if te['Recall'] > self.best_recall:
+                    self.best_recall = te['Recall']; self.best_ndcg = te['NDCG']; bestRes = te
+                self.save_checkpoint(ep, is_best=(te==bestRes))
+                if ep % (args.tstEpoch*2)==0:
+                    self.save_model_weights(ep,'_standard')
+                self.saveHistory()
+                results.append(te)
+                if bestRes is None: bestRes = te
             elif ep % 10 == 0:
                 self.save_checkpoint(ep, is_best=False)
-            
-            print()
-        
-        if args.epoch > 0:
-            try:
-                self.model.eval()
-                self.distill_model.eval()
-                
-                reses = self.testEpoch()
-                result.append(reses)
-                
-                self.save_checkpoint(args.epoch - 1, is_final=True)
-                torch.save(result, f"Standard_result_{args.data}.pkl")
-                
-                log(self.makePrint('Final Test', args.epoch, reses, True))
-                
-                if bestRes is not None:
-                    log(self.makePrint('Best Result', args.epoch, bestRes, True))
-                else:
-                    log('No best result available')
-                
-                self.saveHistory()
-                
-            except Exception as e:
-                log(f"Final evaluation error: {e}")
-                import traceback
-                traceback.print_exc()
-
-        log("Standard training complete.")
+        if args.epoch>0:
+            self.model.eval(); self.distill_model.eval()
+            final = self.testEpoch()
+            results.append(final)
+            self.save_checkpoint(args.epoch-1, is_final=True)
+            torch.save(results, f'Standard_result_{args.data}.pkl')
+            log(self.makePrint('Final Test', args.epoch, final, True))
+            if bestRes:
+                log(self.makePrint('Best Result', args.epoch, bestRes, True))
+            self.saveHistory()
 
     def run(self):
         self.prepareModel()
-        log('Model Prepared')
-        
         checkpoint_loaded = False
-
-        if hasattr(args, 'load_weights') and args.load_weights:
+        if getattr(args,'load_weights',None):
             checkpoint_loaded = self.load_model_weights(args.load_weights)
-            
             if not checkpoint_loaded:
-                log('Regular weight loading failed, attempting transfer learning...')
                 checkpoint_loaded = self.load_model_weights_for_transfer(args.load_weights)
-                
-                if checkpoint_loaded:
-                    self.debug_model_dimensions()  # Verify dimensions match
-                    log('Transfer learning completed successfully')
-                    
-                    if (hasattr(args, 'freeze_first_percent') and args.freeze_first_percent > 0) or \
-                       (hasattr(args, 'freeze_last_percent') and args.freeze_last_percent > 0) or \
-                       (hasattr(args, 'freeze_embeddings') and args.freeze_embeddings) or \
-                       (hasattr(args, 'freeze_backbone') and args.freeze_backbone):
-                        log("Reapplying freezing strategy after transfer learning...")
-                        self.apply_freezing_strategy()
-                        self.setup_fine_tuning_optimizer()
-                        
+                if checkpoint_loaded and (args.freeze_first_percent>0 or args.freeze_last_percent>0 or
+                                          args.freeze_embeddings or args.freeze_backbone):
+                    self.apply_freezing_strategy(); self.setup_fine_tuning_optimizer()
             if checkpoint_loaded:
-                if args.epoch == 0:
-                    self.model.eval()
-                    self.distill_model.eval()
-                    log('Models set to evaluation mode')
+                if args.epoch==0:
+                    self.model.eval(); self.distill_model.eval()
                 else:
-                    self.model.train()
-                    self.distill_model.train()
-                    log('Models set to training mode for fine-tuning')
-            else:
-                log('Failed to load model weights (both regular and transfer learning)')
-
-        elif hasattr(args, 'load_checkpoint') and args.load_checkpoint:
+                    self.model.train(); self.distill_model.train()
+        elif getattr(args,'load_checkpoint',None):
             checkpoint_loaded = self.load_checkpoint(args.load_checkpoint)
-            if checkpoint_loaded:
-                log('Specific checkpoint loaded successfully')
-                log(f'Loaded from: {args.load_checkpoint}')
-            else:
-                log('Failed to load specific checkpoint, starting fresh')
-        
-        elif hasattr(args, 'load_best') and args.load_best:
+        elif getattr(args,'load_best',False):
             checkpoint_loaded = self.load_checkpoint(load_best=True)
-            if checkpoint_loaded:
-                log('Best checkpoint loaded successfully')
-            else:
-                log('No best checkpoint found, starting fresh')
-        
-        elif hasattr(args, 'resume') and args.resume:
+        elif getattr(args,'resume',False):
             checkpoint_loaded = self.load_checkpoint()
-            if checkpoint_loaded:
-                log('Resumed from latest checkpoint')
-            else:
-                log('No checkpoint found, starting fresh')
-        
-        elif args.load_model != None:
+        elif args.load_model is not None:
             try:
-                self.loadModel()
-                checkpoint_loaded = True
-                log('Legacy model loaded successfully')
-            except Exception as e:
-                log(f'Legacy model loading failed: {e}')
+                self.loadModel(); checkpoint_loaded = True
+            except:
                 checkpoint_loaded = False
-        
-        else:
-            log('Model Initialized from scratch')
-        
-        if args.epoch == 0:
-            log('Evaluation-only mode (epoch=0)')
+        if args.epoch==0:
             if not checkpoint_loaded:
-                log('ERROR: No checkpoint loaded for evaluation!')
-                log('Please provide a valid checkpoint path using --load_checkpoint')
-                return
-            
-            self.model.eval()
-            self.distill_model.eval()
-            
-            reses = self.testEpoch()
-            log(self.makePrint('Evaluation', 0, reses, True))
-            
-            torch.save([reses], f"Evaluation_result_{args.data}.pkl")
-            log('Evaluation completed and results saved')
+                log('No checkpoint for evaluation'); return
+            self.model.eval(); self.distill_model.eval()
+            res = self.testEpoch()
+            log(self.makePrint('Evaluation',0,res,True))
+            torch.save([res], f'Evaluation_result_{args.data}.pkl')
             return
-
-        log("Final dimension check before training...")
         self.debug_model_dimensions()
-
-        if hasattr(self.handler, 'torchBiAdj') and self.handler.torchBiAdj.shape[0] != args.user + args.item:
-            log("CRITICAL: Dimensions still don't match! Forcing final cache reset")
-            try:
-                self.handler.reset_cache_for_transfer()
-                self.sampler = LocalGraph(self.gtLayer)
-                self.masker = RandomMaskSubgraphs(args.user, args.item)
-                log("Final reset complete")
-                self.debug_model_dimensions()
-            except Exception as e:
-                log(f"ERROR in final reset: {e}")
-                import traceback
-                traceback.print_exc()
-                log("Training will likely fail due to dimension mismatch!")
-
-        if self.model.uEmbeds.shape[0] != args.user or self.model.iEmbeds.shape[0] != args.item:
-            log("CRITICAL: Embedding dimensions still don't match!")
-            log("Attempting emergency embedding resize...")
-            
-            new_uEmbeds = nn.Parameter(torch.empty(args.user, self.model.uEmbeds.shape[1], device=self.model.uEmbeds.device))
-            nn.init.xavier_uniform_(new_uEmbeds)
-            
-            new_iEmbeds = nn.Parameter(torch.empty(args.item, self.model.iEmbeds.shape[1], device=self.model.iEmbeds.device))
-            nn.init.xavier_uniform_(new_iEmbeds)
-            
-            self.model.uEmbeds = new_uEmbeds
-            self.model.iEmbeds = new_iEmbeds
-            
-            self.distill_model.uEmbeds = nn.Parameter(new_uEmbeds.clone())
-            self.distill_model.iEmbeds = nn.Parameter(new_iEmbeds.clone())
-            
-            log("Emergency embedding resize complete")
-            
-            self.opt = torch.optim.Adam(self.model.parameters(), 
-                                    lr=args.fine_tune_lr if hasattr(args, 'fine_tune_lr') else args.lr, 
-                                    weight_decay=0)
-            log("Optimizer updated with new embedding parameters")
-
-        if hasattr(args, 'curriculum') and args.curriculum:
-            log("Dispatching to curriculum learning")
+        if (self.model.uEmbeds.shape[0]!=args.user) or (self.model.iEmbeds.shape[0]!=args.item):
+            new_u = nn.Parameter(torch.empty(args.user, self.model.uEmbeds.shape[1], device=self.model.uEmbeds.device))
+            new_i = nn.Parameter(torch.empty(args.item, self.model.iEmbeds.shape[1], device=self.model.iEmbeds.device))
+            nn.init.xavier_uniform_(new_u); nn.init.xavier_uniform_(new_i)
+            self.model.uEmbeds = new_u; self.model.iEmbeds = new_i
+            self.distill_model.uEmbeds = nn.Parameter(new_u.clone())
+            self.distill_model.iEmbeds = nn.Parameter(new_i.clone())
+            self.setup_fine_tuning_optimizer()
+        if getattr(args,'curriculum',False):
             self.run_with_curriculum()
         else:
-            log("Dispatching to standard training")
             self.run_standard_training()
+        if getattr(args,'eval_emb_baselines',False):
+            self.evaluate_embedding_baselines()
 
     def trainEpoch(self):
-        # Progressive unfreezing
-        if hasattr(self, 'current_epoch') and hasattr(args, 'progressive_unfreeze') and args.progressive_unfreeze:
-            total_epochs = sum([int(e) for e in args.curriculum_epochs.split(',')]) if hasattr(args, 'curriculum') and args.curriculum else args.epoch
+        if hasattr(self,'current_epoch') and getattr(args,'progressive_unfreeze',False):
+            total_epochs = (sum([int(e) for e in args.curriculum_epochs.split(',')])
+                            if getattr(args,'curriculum',False) else args.epoch)
             self.progressive_unfreeze_layers(self.current_epoch, total_epochs)
-        
-        total_epochs = sum([int(e) for e in args.curriculum_epochs.split(',')]) if hasattr(args, 'curriculum') and args.curriculum else args.epoch
-        temperature = self.calculate_temperature(self.current_epoch if hasattr(self, 'current_epoch') else 0, total_epochs)
-        
+        total_epochs = (sum([int(e) for e in args.curriculum_epochs.split(',')])
+                        if getattr(args,'curriculum',False) else args.epoch)
+        temperature = self.calculate_temperature(getattr(self,'current_epoch',0), total_epochs)
         trnLoader = self.handler.trnLoader
         trnLoader.dataset.negSampling()
-        epLoss, epPreLoss = 0, 0
+        epLoss = 0; epPre = 0
         steps = trnLoader.dataset.__len__() // args.batch
         self.handler.preSelect_anchor_set()
-        
         for i, tem in enumerate(trnLoader):
             if i % args.fixSteps == 0:
-                att_edge, add_adj = self.sampler(self.handler.torchBiAdj, self.model.getEgoEmbeds(),
-                                                self.handler)
+                att_edge, add_adj = self.sampler(self.handler.torchBiAdj, self.model.getEgoEmbeds(), self.handler)
                 encoderAdj, decoderAdj, sub, cmp = self.masker(add_adj, att_edge)
             ancs, poss, negs = tem
-            ancs = ancs.long().cuda()
-            poss = poss.long().cuda()
-            negs = negs.long().cuda()
-
+            ancs = ancs.long().cuda(); poss = poss.long().cuda(); negs = negs.long().cuda()
             with torch.no_grad():
-                distill_usrEmbeds, distill_itmEmbeds, distill_cList, distill_subLst = self.distill_model(
-                    self.handler, False, sub, cmp, encoderAdj, decoderAdj)
-
+                d_u, d_i, d_c, d_s = self.distill_model(self.handler, False, sub, cmp, encoderAdj, decoderAdj)
             try:
-                usrEmbeds, itmEmbeds, cList, subLst = self.model(
-                    self.handler, False, sub, cmp, encoderAdj, decoderAdj, temperature=temperature)
+                usrE, itmE, cList, subLst = self.model(self.handler, False, sub, cmp, encoderAdj, decoderAdj, temperature=temperature)
             except TypeError:
-                usrEmbeds, itmEmbeds, cList, subLst = self.model(
-                    self.handler, False, sub, cmp, encoderAdj, decoderAdj)
-                
-            ancEmbeds = usrEmbeds[ancs]
-            posEmbeds = itmEmbeds[poss]
-            negEmbeds = itmEmbeds[negs]
-
-            usrEmbeds2 = subLst[:args.user]
-            itmEmbeds2 = subLst[args.user:]
-            ancEmbeds2 = usrEmbeds2[ancs]
-            posEmbeds2 = itmEmbeds2[poss]
-
-            bprLoss = (-torch.sum(ancEmbeds * posEmbeds, dim=-1)).mean() * temperature
-            scoreDiff = pairPredict(ancEmbeds2, posEmbeds2, negEmbeds)
-            bprLoss2 = -(scoreDiff).sigmoid().log().sum() / args.batch * temperature
-
+                usrE, itmE, cList, subLst = self.model(self.handler, False, sub, cmp, encoderAdj, decoderAdj)
+            ancE = usrE[ancs]; posE = itmE[poss]; negE = itmE[negs]
+            usrE2 = subLst[:args.user]; itmE2 = subLst[args.user:]
+            ancE2 = usrE2[ancs]; posE2 = itmE2[poss]
+            bpr1 = (-torch.sum(ancE * posE, dim=-1)).mean() * temperature
+            scoreDiff = pairPredict(ancE2, posE2, negE)
+            bpr2 = -(scoreDiff).sigmoid().log().sum() / args.batch * temperature
             regLoss = calcRegLoss(self.model) * args.reg
-
-            contrastLoss = ((contrast(ancs, usrEmbeds) + contrast(poss, itmEmbeds)) * args.ssl_reg + 
-                        contrast(ancs, usrEmbeds, itmEmbeds) + 
-                        args.ctra * contrastNCE(ancs, subLst, cList)) * temperature
-
-            distill_loss_usr = F.mse_loss(usrEmbeds, distill_usrEmbeds)
-            distill_loss_itm = F.mse_loss(itmEmbeds, distill_itmEmbeds)
-            distill_loss_cList = F.mse_loss(cList, distill_cList)
-            distill_loss_subLst = F.mse_loss(subLst, distill_subLst)
-
-            distill_loss = (distill_loss_usr + distill_loss_itm + distill_loss_cList + distill_loss_subLst) * self.distill_weight
-
-            loss = bprLoss + regLoss + contrastLoss + args.b2 * bprLoss2 + distill_loss
-            epLoss += loss.item()
-            epPreLoss += bprLoss.item()
-            self.opt.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=20, norm_type=2)
+            clLoss = ((contrast(ancs, usrE) + contrast(poss, itmE)) * args.ssl_reg +
+                      contrast(ancs, usrE, itmE) + args.ctra * contrastNCE(ancs, subLst, cList)) * temperature
+            distill = (F.mse_loss(usrE,d_u)+F.mse_loss(itmE,d_i)+F.mse_loss(cList,d_c)+F.mse_loss(subLst,d_s))*self.distill_weight
+            loss = bpr1 + regLoss + clLoss + args.b2 * bpr2 + distill
+            epLoss += loss.item(); epPre += bpr1.item()
+            self.opt.zero_grad(); loss.backward()
+            nn.utils.clip_grad_norm_(self.model.parameters(),20)
             self.opt.step()
-            log('Step %d/%d: loss = %.3f, regLoss = %.3f, clLoss = %.3f, temp = %.3f        ' % (
-                i, steps, loss, regLoss, contrastLoss, temperature), save=False, oneline=True)
-
+            log('Step %d/%d: loss=%.3f reg=%.3f cl=%.3f temp=%.3f  ' % (i, steps, loss, regLoss, clLoss, temperature),
+                save=False, oneline=True)
         self.distill_model.load_state_dict(self.model.state_dict())
+        return {'Loss': epLoss/steps, 'preLoss': epPre/steps, 'Temperature': temperature}
 
-        ret = dict()
-        ret['Loss'] = epLoss / steps
-        ret['preLoss'] = epPreLoss / steps
-        ret['Temperature'] = temperature  
-        return ret
-    
     def valEpoch(self):
-        total_epochs = sum([int(e) for e in args.curriculum_epochs.split(',')]) if hasattr(args, 'curriculum') and args.curriculum else args.epoch
-        temperature = self.calculate_temperature(self.current_epoch if hasattr(self, 'current_epoch') else 0, total_epochs)
-
+        total_epochs = (sum([int(e) for e in args.curriculum_epochs.split(',')])
+                        if getattr(args,'curriculum',False) else args.epoch)
+        _ = self.calculate_temperature(getattr(self,'current_epoch',0), total_epochs)
         valLoader = self.handler.valLoader
-        epLoss, epPreLoss = 0, 0
+        epLoss=0; epPre=0
         steps = valLoader.dataset.__len__() // args.batch
         with torch.no_grad():
             for i, tem in enumerate(valLoader):
                 if i % args.fixSteps == 0:
-                    att_edge, add_adj = self.sampler(self.handler.torchBiAdj, self.model.getEgoEmbeds(),
-                                                 self.handler)
+                    att_edge, add_adj = self.sampler(self.handler.torchBiAdj, self.model.getEgoEmbeds(), self.handler)
                     encoderAdj, decoderAdj, sub, cmp = self.masker(add_adj, att_edge)
                 ancs, poss, negs = tem
-                ancs = ancs.long().cuda()
-                poss = poss.long().cuda()
-                negs = negs.long().cuda()
-
-                usrEmbeds, itmEmbeds, cList, subLst = self.model(self.handler, False, sub, cmp, encoderAdj, decoderAdj)
-                ancEmbeds = usrEmbeds[ancs]
-                posEmbeds = itmEmbeds[poss]
-                negEmbeds = itmEmbeds[negs]
-
-                usrEmbeds2 = subLst[:args.user]
-                itmEmbeds2 = subLst[args.user:]
-                ancEmbeds2 = usrEmbeds2[ancs]
-                posEmbeds2 = itmEmbeds2[poss]
-
-                bprLoss = (-torch.sum(ancEmbeds * posEmbeds, dim=-1)).mean()
-                scoreDiff = pairPredict(ancEmbeds2, posEmbeds2, negEmbeds)
-                bprLoss2 = - (scoreDiff).sigmoid().log().sum() / args.batch
-
+                ancs = ancs.long().cuda(); poss = poss.long().cuda(); negs = negs.long().cuda()
+                usrE, itmE, cList, subLst = self.model(self.handler, False, sub, cmp, encoderAdj, decoderAdj)
+                ancE = usrE[ancs]; posE = itmE[poss]; negE = itmE[negs]
+                usrE2 = subLst[:args.user]; itmE2 = subLst[args.user:]
+                ancE2 = usrE2[ancs]; posE2 = itmE2[poss]
+                bpr1 = (-torch.sum(ancE * posE, dim=-1)).mean()
+                scoreDiff = pairPredict(ancE2, posE2, negE)
+                bpr2 = -(scoreDiff).sigmoid().log().sum()/args.batch
                 regLoss = calcRegLoss(self.model) * args.reg
+                clLoss = (contrast(ancs, usrE)+contrast(poss,itmE))*args.ssl_reg + contrast(ancs, usrE, itmE) + args.ctra*contrastNCE(ancs, subLst, cList)
+                loss = bpr1 + regLoss + clLoss + args.b2*bpr2
+                epLoss += loss.item(); epPre += bpr1.item()
+                log('Val %d/%d: loss=%.3f reg=%.3f cl=%.3f  ' % (i, steps, loss, regLoss, clLoss),
+                    save=False, oneline=True)
+        return {'Loss': epLoss/steps if steps>0 else 0, 'preLoss': epPre/steps if steps>0 else 0}
 
-                contrastLoss = (contrast(ancs, usrEmbeds) + contrast(poss, itmEmbeds)) * args.ssl_reg + contrast(
-                    ancs, usrEmbeds, itmEmbeds) + args.ctra * contrastNCE(ancs, subLst, cList)
-                loss = bprLoss + regLoss + contrastLoss + args.b2 * bprLoss2
-
-                epLoss += loss.item()
-                epPreLoss += bprLoss.item()
-                log('Validation Step %d/%d: loss = %.3f, regLoss = %.3f, clLoss = %.3f        ' % (
-                    i, steps, loss, regLoss, contrastLoss), save=False, oneline=True)
-                
-        ret = dict()
-        if steps > 0:
-            ret['Loss'] = epLoss / steps
-            ret['preLoss'] = epPreLoss / steps
-        else:
-            ret['Loss'] = 0
-            ret['preLoss'] = 0
-        return ret
-            
     def calculate_temperature(self, epoch, total_epochs):
-        """Calculate temperature based on the current epoch and schedule"""
-        if not hasattr(args, 'heating') or not args.heating:
-            return 1.0
-        
-        min_temp = getattr(args, 'min_temp', 0.1)
-        max_temp = getattr(args, 'max_temp', 10.0)
-        schedule = getattr(args, 'temp_schedule', 'linear')
-        
+        if not getattr(args,'heating',False): return 1.0
+        min_t = getattr(args,'min_temp',0.1)
+        max_t = getattr(args,'max_temp',5.0)
+        schedule = getattr(args,'temp_schedule','linear')
         progress = epoch / total_epochs
-        
-        if schedule == 'linear':
-            temp = min_temp + (max_temp - min_temp) * progress
-        elif schedule == 'exponential':
-            temp = min_temp * (max_temp / min_temp) ** progress
-        elif schedule == 'step':
-            if progress < 0.3:
-                temp = min_temp
-            elif progress < 0.6:
-                temp = (min_temp + max_temp) / 2
-            else:
-                temp = max_temp
+        if schedule=='linear':
+            tval = min_t + (max_t-min_t)*progress
+        elif schedule=='exponential':
+            tval = min_t * (max_t/min_t) ** progress
+        elif schedule=='step':
+            if progress < 0.3: tval = min_t
+            elif progress < 0.6: tval = (min_t+max_t)/2
+            else: tval = max_t
         else:
-            temp = min_temp + (max_temp - min_temp) * progress
-        
-        log(f"Epoch {epoch}/{total_epochs}: Temperature = {temp:.4f}", save=False)
-        return temp
+            tval = min_t + (max_t-min_t)*progress
+        log(f'Epoch {epoch}/{total_epochs} Temp={tval:.4f}', save=False)
+        return tval
+
     def testEpoch(self):
-        self.model.eval()
-        self.distill_model.eval()
-        
+        self.model.eval(); self.distill_model.eval()
         tstLoader = self.handler.tstLoader
-        epLoss, epRecall, epNdcg = [0] * 3
-        i = 0
+        epRecall=0; epNdcg=0; i=0
         num = tstLoader.dataset.__len__()
         steps = num // args.tstBat
-        
         with torch.no_grad():
             for usr, trnMask in tstLoader:
-                i += 1
+                i+=1
                 usr = usr.long().cuda()
                 trnMask = trnMask.cuda()
-                usrEmbeds, itmEmbeds, _, _ = self.model(self.handler, True, self.handler.torchBiAdj, self.handler.torchBiAdj,
-                                                            self.handler.torchBiAdj)
-
-                allPreds = torch.mm(usrEmbeds[usr], torch.transpose(itmEmbeds, 1, 0)) * (1 - trnMask) - trnMask * 1e8
-                _, topLocs = torch.topk(allPreds, args.topk)
+                usrE, itmE, _, _ = self.model(self.handler, True, self.handler.torchBiAdj,
+                                              self.handler.torchBiAdj, self.handler.torchBiAdj)
+                preds = torch.mm(usrE[usr], itmE.t()) * (1-trnMask) - trnMask*1e8
+                _, topLocs = torch.topk(preds, args.topk)
                 recall, ndcg = self.calcRes(topLocs.cpu().numpy(), self.handler.tstLoader.dataset.tstLocs, usr)
-                epRecall += recall
-                epNdcg += ndcg
-                log('Steps %d/%d: recall = %.2f, ndcg = %.2f          ' % (i, steps, recall, ndcg), save=False,
-                    oneline=True)
-        
-        ret = dict()
-        ret['Recall'] = epRecall / num
-        ret['NDCG'] = epNdcg / num
-        return ret
+                epRecall += recall; epNdcg += ndcg
+                log('Test %d/%d: recall=%.2f ndcg=%.2f  ' % (i, steps, recall, ndcg), save=False, oneline=True)
+        return {'Recall': epRecall/num, 'NDCG': epNdcg/num}
 
     def calcRes(self, topLocs, tstLocs, batIds):
-        assert topLocs.shape[0] == len(batIds)
-        allRecall = allNdcg = 0
+        allR=0; allN=0
         for i in range(len(batIds)):
-            temTopLocs = list(topLocs[i])
-            temTstLocs = tstLocs[batIds[i]]
-            tstNum = len(temTstLocs)
-            maxDcg = np.sum([np.reciprocal(np.log2(loc + 2)) for loc in range(min(tstNum, args.topk))])
-            recall = dcg = 0
-            for val in temTstLocs:
-                if val in temTopLocs:
-                    recall += 1
-                    dcg += np.reciprocal(np.log2(temTopLocs.index(val) + 2))
-            recall = recall / tstNum
-            ndcg = dcg / maxDcg
-            allRecall += recall
-            allNdcg += ndcg
-        return allRecall, allNdcg
+            tTop = list(topLocs[i])
+            tTst = tstLocs[batIds[i]]
+            tstNum = len(tTst)
+            maxDcg = np.sum([np.reciprocal(np.log2(l+2)) for l in range(min(tstNum, args.topk))])
+            rec=0; dcg=0
+            for v in tTst:
+                if v in tTop:
+                    rec += 1
+                    dcg += np.reciprocal(np.log2(tTop.index(v)+2))
+            rec /= tstNum
+            ndcg = dcg / maxDcg if maxDcg>0 else 0
+            allR += rec; allN += ndcg
+        return allR, allN
 
     def saveHistory(self):
-        if args.epoch == 0 and not (hasattr(args, 'curriculum') and args.curriculum):
-            return
-        with open('History/' + args.save_path + '.his', 'wb') as fs:
+        if args.epoch==0 and not getattr(args,'curriculum',False): return
+        with open('History/'+args.save_path+'.his','wb') as fs:
             pickle.dump(self.metrics, fs)
-
-        content = {
-            'model': self.model,
-        }
-        torch.save(content, 'Models/' + args.save_path + '.mod')
-        log('Model Saved: %s' % args.save_path)
+        torch.save({'model': self.model}, 'Models/'+args.save_path+'.mod')
+        log(f'Model Saved: {args.save_path}')
 
     def loadModel(self):
-        ckp = torch.load('Models/' + args.load_model + '.mod', weights_only=False)
+        ckp = torch.load('Models/'+args.load_model+'.mod', weights_only=False)
         self.model = ckp['model']
         self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
-
-        with open('History/' + args.load_model + '.his', 'rb') as fs:
+        with open('History/'+args.load_model+'.his','rb') as fs:
             self.metrics = pickle.load(fs)
-        log('Model Loaded')
+
+    # --- Embedding Baselines (MF / CF / NCF) ---
+
+    def evaluate_with_embeddings(self, user_emb, item_emb, tag, scorer='dot', ncf_mlp=None):
+        tstLoader = self.handler.tstLoader
+        total_recall=0.0; total_ndcg=0.0
+        num = tstLoader.dataset.__len__()
+        user_emb = user_emb.cuda(); item_emb = item_emb.cuda()
+        with torch.no_grad():
+            for usr_batch, trnMask in tstLoader:
+                usr_batch = usr_batch.cuda()
+                trnMask = trnMask.cuda()
+                uE = user_emb[usr_batch]
+                if scorer == 'dot':
+                    scores = torch.mm(uE, item_emb.t())
+                else:  # NCF
+                    prod = uE.unsqueeze(1) * item_emb.unsqueeze(0)  # (B,I,d)
+                    scores = ncf_mlp(prod).squeeze(-1)              # (B,I)
+                scores = scores * (1-trnMask) - trnMask*1e8
+                _, topLocs = torch.topk(scores, args.topk)
+                recall, ndcg = self.calcRes(topLocs.cpu().numpy(), self.handler.tstLoader.dataset.tstLocs, usr_batch)
+                total_recall += recall; total_ndcg += ndcg
+        recall = total_recall / num
+        ndcg = total_ndcg / num
+        log(f'[Baseline {tag}] Recall={recall:.4f}, NDCG={ndcg:.4f}')
+        return {'Recall': recall, 'NDCG': ndcg}
+
+    def train_mf_baseline(self):
+        d = args.mf_dim if args.mf_dim else args.latdim
+        U = torch.randn(args.user, d, device='cuda') * 0.01
+        V = torch.randn(args.item, d, device='cuda') * 0.01
+        U.requires_grad_(True); V.requires_grad_(True)
+        opt = torch.optim.Adam([U,V], lr=args.mf_lr)
+        rows = self.handler.trnLoader.dataset.rows
+        cols = self.handler.trnLoader.dataset.cols
+        n = len(rows); idx = np.arange(n)
+        for ep in range(args.mf_epochs):
+            np.random.shuffle(idx)
+            for s in range(0, n, args.baseline_batch):
+                bidx = idx[s:s+args.baseline_batch]
+                u = torch.as_tensor(rows[bidx], device='cuda', dtype=torch.long)
+                i = torch.as_tensor(cols[bidx], device='cuda', dtype=torch.long)
+                negs=[]
+                for uu in u.tolist():
+                    for _ in range(args.mf_neg):
+                        while True:
+                            ni = np.random.randint(args.item)
+                            if ni not in self.handler.user_items[uu]:
+                                negs.append(ni); break
+                neg = torch.as_tensor(negs, device='cuda', dtype=torch.long)
+                u_rep = u.repeat_interleave(args.mf_neg)
+                pos = (U[u]*V[i]).sum(-1)
+                negs = (U[u_rep]*V[neg]).sum(-1)
+                loss = -torch.log(torch.sigmoid(pos.repeat_interleave(args.mf_neg)-negs)).mean()
+                opt.zero_grad(); loss.backward(); opt.step()
+            log(f'MF epoch {ep+1}/{args.mf_epochs}')
+        return U.detach(), V.detach()
+
+    def build_cf_embeddings(self):
+        d = args.latdim
+        item_emb = torch.randn(args.item, d, device='cuda') * 0.01
+        user_emb = torch.zeros(args.user, d, device='cuda')
+        for u, items in enumerate(self.handler.user_items):
+            if items:
+                user_emb[u] = item_emb[items].mean(0)
+        return user_emb, item_emb
+
+    def train_ncf(self, U_init, V_init):
+        U = U_init.clone().detach().requires_grad_(True)
+        V = V_init.clone().detach().requires_grad_(True)
+        hidden = [int(h) for h in args.ncf_hidden.split(',') if h]
+        layers=[]; in_d = U.shape[1]
+        for h in hidden:
+            layers.append(nn.Linear(in_d,h)); layers.append(nn.ReLU()); in_d = h
+        layers.append(nn.Linear(in_d,1))
+        mlp = nn.Sequential(*layers).cuda()
+        opt = torch.optim.Adam(list(mlp.parameters())+[U,V], lr=args.ncf_lr)
+        rows = self.handler.trnLoader.dataset.rows
+        cols = self.handler.trnLoader.dataset.cols
+        n = len(rows); idx = np.arange(n)
+        for ep in range(args.ncf_epochs):
+            np.random.shuffle(idx)
+            for s in range(0,n,args.baseline_batch):
+                bidx = idx[s:s+args.baseline_batch]
+                u = torch.as_tensor(rows[bidx], device='cuda', dtype=torch.long)
+                i = torch.as_tensor(cols[bidx], device='cuda', dtype=torch.long)
+                negs=[]
+                for uu in u.tolist():
+                    for _ in range(args.mf_neg):
+                        while True:
+                            ni = np.random.randint(args.item)
+                            if ni not in self.handler.user_items[uu]:
+                                negs.append(ni); break
+                neg = torch.as_tensor(negs, device='cuda', dtype=torch.long)
+                u_rep = u.repeat_interleave(args.mf_neg)
+                pos_feat = (U[u]*V[i])
+                neg_feat = (U[u_rep]*V[neg])
+                pos_score = mlp(pos_feat).view(-1)
+                neg_score = mlp(neg_feat).view(-1)
+                loss = -torch.log(torch.sigmoid(pos_score.repeat_interleave(args.mf_neg)-neg_score)).mean()
+                opt.zero_grad(); loss.backward(); opt.step()
+            log(f'NCF epoch {ep+1}/{args.ncf_epochs}')
+        return U.detach(), V.detach(), mlp
+
+    def evaluate_embedding_baselines(self):
+        log('=== Embedding Baselines ===')
+        U_mf, V_mf = self.train_mf_baseline()
+        self.evaluate_with_embeddings(U_mf, V_mf, 'MF')
+        U_cf, V_cf = self.build_cf_embeddings()
+        self.evaluate_with_embeddings(U_cf, V_cf, 'CF')
+        U_ncf, V_ncf, mlp = self.train_ncf(U_mf, V_mf)
+        class ApplyLayers(nn.Module):
+            def __init__(self, seq):
+                super().__init__(); self.seq = seq
+            def forward(self,x):
+                B,I,D = x.shape
+                x = x.view(B*I, D)
+                x = self.seq(x)
+                return x.view(B,I,1)
+        ncf_mlp = ApplyLayers(mlp).cuda()
+        self.evaluate_with_embeddings(U_ncf, V_ncf, 'NCF', scorer='ncf', ncf_mlp=ncf_mlp)
+        log('=== Done ===')
 
 
 if __name__ == '__main__':
     logger.saveDefault = True
-
     log('Start')
     if torch.cuda.is_available():
-        print("using cuda")
+        print('using cuda')
     handler = DataHandler()
     handler.LoadData()
     log('Load Data')
