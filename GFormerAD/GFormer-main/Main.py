@@ -2,6 +2,9 @@ import torch
 import Utils.TimeLogger as logger
 from Utils.TimeLogger import log
 from Params import args
+
+
+
 from Model import Model, RandomMaskSubgraphs, LocalGraph, GTLayer, ResidualGTLayer
 from DataHandler import DataHandler
 import pickle
@@ -12,8 +15,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from datetime import datetime
 import numpy as np
-os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 import torch as t
+
+import os
+import random
+import numpy as np
+import torch
+import Utils.TimeLogger as logger
+from Utils.TimeLogger import log
+os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
 
 class Coach:
