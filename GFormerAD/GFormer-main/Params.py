@@ -73,7 +73,8 @@ def ParseArgs():
     parser.add_argument('--temp_schedule', type=str, default='linear', help='Temperature schedule: linear, exponential, or step')
 
 
-    parser.add_argument('--eval_emb_baselines', action='store_true', default=False, help='Evaluate MF/CF/NCF embedding baselines after training')
+    parser.add_argument('--eval_emb_baselines', action='store_true', default=False,help='Run embedding baselines after main training')
+    parser.add_argument('--baseline_list', type=str, default='MF,CF,NCF', help='Comma-separated subset of {MF,CF,NCF}')
     parser.add_argument('--mf_dim', type=int, default=32, help='MF latent dim (default=latdim if not set)')
     parser.add_argument('--mf_epochs', type=int, default=5, help='Epochs for quick MF baseline')
     parser.add_argument('--mf_lr', type=float, default=5e-3, help='Learning rate for MF baseline')

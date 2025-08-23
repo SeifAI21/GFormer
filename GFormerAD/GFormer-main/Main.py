@@ -650,23 +650,30 @@ class Coach:
         return U.detach(), V.detach(), mlp
 
     def evaluate_embedding_baselines(self):
-        log('=== Embedding Baselines ===')
-        U_mf, V_mf = self.train_mf_baseline()
-        self.evaluate_with_embeddings(U_mf, V_mf, 'MF')
-        U_cf, V_cf = self.build_cf_embeddings()
-        self.evaluate_with_embeddings(U_cf, V_cf, 'CF')
-        U_ncf, V_ncf, mlp = self.train_ncf(U_mf, V_mf)
-        class ApplyLayers(nn.Module):
-            def __init__(self, seq):
-                super().__init__(); self.seq = seq
-            def forward(self,x):
-                B,I,D = x.shape
-                x = x.view(B*I, D)
-                x = self.seq(x)
-                return x.view(B,I,1)
-        ncf_mlp = ApplyLayers(mlp).cuda()
-        self.evaluate_with_embeddings(U_ncf, V_ncf, 'NCF', scorer='ncf', ncf_mlp=ncf_mlp)
-        log('=== Done ===')
+        selected = set([s.strip().upper() for s in getattr(args,'baseline_list','MF,CF,NCF').split(',') if s.strip()])
+        log('=== Embedding Baselines Selected: ' + ', '.join(sorted(selected)) + ' ===')
+        U_mf = V_mf = None
+        if 'MF' in selected:
+            U_mf, V_mf = self.train_mf_baseline()
+            self.evaluate_with_embeddings(U_mf, V_mf, 'MF')
+        if 'CF' in selected:
+            U_cf, V_cf = self.build_cf_embeddings()
+            self.evaluate_with_embeddings(U_cf, V_cf, 'CF')
+        if 'NCF' in selected:
+            if U_mf is None:  # need MF init
+                U_mf, V_mf = self.train_mf_baseline()
+            U_ncf, V_ncf, mlp = self.train_ncf(U_mf, V_mf)
+            class ApplyLayers(nn.Module):
+                def __init__(self, seq):
+                    super().__init__(); self.seq = seq
+                def forward(self,x):
+                    B,I,D = x.shape
+                    x = x.view(B*I, D)
+                    x = self.seq(x)
+                    return x.view(B,I,1)
+            ncf_mlp = ApplyLayers(mlp).cuda()
+            self.evaluate_with_embeddings(U_ncf, V_ncf, 'NCF', scorer='ncf', ncf_mlp=ncf_mlp)
+        log('=== Baselines Done ===')
 
 
 if __name__ == '__main__':
