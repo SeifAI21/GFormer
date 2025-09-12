@@ -305,6 +305,11 @@ class Coach:
             for _ in range(stages[si]):
                 if g_ep >= total_epochs: break
                 self.current_epoch = g_ep
+                
+                # Update teacher model once per epoch
+                if self.distill_model is not None:
+                    self.distill_model.load_state_dict(self.model.state_dict())
+
                 self.model.train(); self.distill_model.train()
                 tr = self.trainEpoch()
                 log(self.makePrint(f'Train(Stage{si+1})', g_ep, tr, True, total_epochs))
@@ -339,6 +344,11 @@ class Coach:
         results = []
         for ep in range(self.start_epoch, args.epoch):
             self.current_epoch = ep
+
+            # Update teacher model once per epoch
+            if self.distill_model is not None:
+                self.distill_model.load_state_dict(self.model.state_dict())
+
             self.model.train(); self.distill_model.train()
             tstFlag = (ep % args.tstEpoch == 0)
             tr = self.trainEpoch()
@@ -457,20 +467,35 @@ class Coach:
             ancE = usrE[ancs]; posE = itmE[poss]; negE = itmE[negs]
             usrE2 = subLst[:args.user]; itmE2 = subLst[args.user:]
             ancE2 = usrE2[ancs]; posE2 = itmE2[poss]
-            bpr1 = (-torch.sum(ancE * posE, dim=-1)).mean() * temperature
+
+            # --- 1. Calculate all raw loss components first ---
+            bpr1_raw = (-torch.sum(ancE * posE, dim=-1)).mean()
             scoreDiff = pairPredict(ancE2, posE2, negE)
-            bpr2 = -(scoreDiff).sigmoid().log().sum() / args.batch * temperature
-            regLoss = calcRegLoss(self.model) * args.reg
-            clLoss = ((contrast(ancs, usrE) + contrast(poss, itmE)) * args.ssl_reg +
-                      contrast(ancs, usrE, itmE) + args.ctra * contrastNCE(ancs, subLst, cList)) * temperature
-            distill = (F.mse_loss(usrE,d_u)+F.mse_loss(itmE,d_i)+F.mse_loss(cList,d_c)+F.mse_loss(subLst,d_s))*self.distill_weight
-            orthoLoss = 0.0
+            bpr2_raw = -(scoreDiff).sigmoid().log().sum() / args.batch
+            regLoss_raw = calcRegLoss(self.model) * args.reg
+            clLoss_raw = ((contrast(ancs, usrE) + contrast(poss, itmE)) * args.ssl_reg +
+                          contrast(ancs, usrE, itmE) + args.ctra * contrastNCE(ancs, subLst, cList))
+            distill_raw = (F.mse_loss(usrE,d_u)+F.mse_loss(itmE,d_i)+F.mse_loss(cList,d_c)+F.mse_loss(subLst,d_s))
+            
+            orthoLoss_raw = 0.0
             if getattr(args,'ortho_reg',0.0) > 0:
-                orthoLoss = args.ortho_reg * (
+                orthoLoss_raw = args.ortho_reg * (
                     column_orthogonality(self.model.uEmbeds) +
                     column_orthogonality(self.model.iEmbeds)
                 )
-            loss = bpr1 + regLoss + clLoss + args.b2 * bpr2 + distill + orthoLoss
+
+            # --- 2. Apply temperature scaling and weights uniformly ---
+            T = temperature
+            bpr1 = bpr1_raw * T
+            bpr2 = bpr2_raw * args.b2 * T
+            clLoss = clLoss_raw * T
+            regLoss = regLoss_raw * T
+            orthoLoss = orthoLoss_raw * T
+            distill = distill_raw * self.distill_weight * T
+
+            # --- 3. Sum up the final loss ---
+            loss = bpr1 + regLoss + clLoss + bpr2 + distill + orthoLoss
+
             epLoss += loss.item(); epPre += bpr1.item()
             self.opt.zero_grad(); loss.backward()
             nn.utils.clip_grad_norm_((self.model.parameters()),20)
@@ -478,7 +503,7 @@ class Coach:
             log('Step %d/%d: loss=%.3f ortho=%.3f reg=%.3f cl=%.3f temp=%.3f' %
                 (i, steps, loss, orthoLoss if getattr(args,'ortho_reg',0.0)>0 else 0, regLoss, clLoss, temperature),
                 save=False, oneline=True)
-        self.distill_model.load_state_dict(self.model.state_dict())
+        # self.distill_model.load_state_dict(self.model.state_dict()) #<-- REMOVED: Moved to main training loop
         return {'Loss': epLoss/steps, 'preLoss': epPre/steps, 'Temperature': temperature}
 
     def valEpoch(self):
@@ -522,11 +547,11 @@ class Coach:
         min_t = getattr(args,'min_temp',0.1)
         max_t = getattr(args,'max_temp',5.0)
         schedule = getattr(args,'temp_schedule','linear')
-        progress = epoch / total_epochs
+        progress = epoch / total_epochs if total_epochs > 0 else 0
         if schedule=='linear':
             tval = min_t + (max_t-min_t)*progress
         elif schedule=='exponential':
-            tval = min_t * (max_t/min_t) ** progress
+            tval = min_t * (max_t/min_t) ** progress if min_t > 0 else max_t * progress
         elif schedule=='step':
             if progress < 0.3: tval = min_t
             elif progress < 0.6: tval = (min_t+max_t)/2
