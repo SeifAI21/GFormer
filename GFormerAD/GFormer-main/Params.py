@@ -1,4 +1,5 @@
 import argparse
+from email import parser
 
 def ParseArgs():
     parser = argparse.ArgumentParser(description='Model Params')
@@ -41,52 +42,19 @@ def ParseArgs():
     parser.add_argument('--early_stop', type=int, default=0,
                         help='Early stopping patience (0 = disabled). Uses fixed min_delta=0.0005 on Recall.')
     
-    # ===== CHECKPOINTING PARAMETERS =====
+    parser.add_argument('--tstEpoch', default=1, type=int, help='number of epoch to test while training')
+    parser.add_argument('--save_path', default='tem', help='file name to save model and training record')
     parser.add_argument('--resume', default=False, action='store_true', help='Resume from latest checkpoint')
-    parser.add_argument('--load_checkpoint', default=None, type=str, help='Path to specific checkpoint to load')
-    parser.add_argument('--load_best', default=False, action='store_true', help='Load best checkpoint instead of latest')
-    parser.add_argument('--save_freq', default=10, type=int, help='Frequency of saving checkpoints (epochs)')
+    parser.add_argument('--load_weights', type=str, default=None, help='Path to weights file to load for training or eval')
     parser.add_argument('--keep_checkpoints', default=5, type=int, help='Number of regular checkpoints to keep')
-    parser.add_argument('--checkpoint_dir', default='Checkpoints', type=str, help='Directory to save checkpoints')
-    parser.add_argument('--save_weights_freq', default=20, type=int, help='Frequency of saving model weights (epochs)')
-    parser.add_argument('--auto_save', default=True, action='store_true', help='Enable automatic checkpoint saving')
-    parser.add_argument('--save_best_only', default=False, action='store_true', help='Only save checkpoints when performance improves')
-    parser.add_argument('--load_weights', type=str, default=None, help='Path to weights file to load')
     
-    # ===== FINE-TUNING PARAMETERS =====
-    parser.add_argument('--freeze_first_percent', type=float, default=0.0, help='Freeze first X% of layers (0.0-1.0)')
-    parser.add_argument('--freeze_last_percent', type=float, default=0.0, help='Freeze last X% of layers (0.0-1.0)')
-    parser.add_argument('--freeze_embeddings', default=False, action='store_true', help='Freeze embeddings only')
-    parser.add_argument('--freeze_backbone', default=False, action='store_true', help='Freeze GCN and GT layers, train only final layers')
-    parser.add_argument('--progressive_unfreeze', default=False, action='store_true', help='Progressively unfreeze layers during training')
-    parser.add_argument('--unfreeze_schedule', type=str, default='linear', choices=['linear', 'exponential'], help='Schedule for progressive unfreezing')
-    parser.add_argument('--fine_tune_lr', type=float, default=None, help='Different learning rate for fine-tuning (if not set, uses --lr)')
-    parser.add_argument('--frozen_lr_scale', type=float, default=0.1, help='Learning rate scale for frozen->unfrozen layers')
-    
-    # ===== CURRICULUM LEARNING PARAMETERS =====
-    parser.add_argument('--curriculum', default=False, action='store_true', help='Enable curriculum learning')
-    parser.add_argument('--curriculum_schedule', default='0.2,0.5,1.0', type=str, help='Comma-separated schedule for data inclusion (e.g., 0.2,0.5,1.0)')
-    parser.add_argument('--curriculum_epochs', default='30,30,40', type=str, help='Comma-separated epochs for each curriculum stage')
+ 
 
-    # Add these arguments to the parser in Params.py
     parser.add_argument('--heating', type=int, default=0, help='Enable curriculum heating (1/0)')
     parser.add_argument('--max_temp', type=float, default=10.0, help='Maximum temperature for curriculum heating')
     parser.add_argument('--min_temp', type=float, default=0.1, help='Minimum temperature for curriculum heating')
     parser.add_argument('--temp_schedule', type=str, default='linear', help='Temperature schedule: linear, exponential, or step')
 
-
-    parser.add_argument('--eval_emb_baselines', action='store_true', default=False,help='Run embedding baselines after main training')
-    parser.add_argument('--baseline_list', type=str, default='MF,CF,NCF', help='Comma-separated subset of {MF,CF,NCF}')
-    parser.add_argument('--mf_dim', type=int, default=32, help='MF latent dim (default=latdim if not set)')
-    parser.add_argument('--mf_epochs', type=int, default=5, help='Epochs for quick MF baseline')
-    parser.add_argument('--mf_lr', type=float, default=5e-3, help='Learning rate for MF baseline')
-    parser.add_argument('--mf_neg', type=int, default=1, help='Negatives per positive for MF/NCF BPR')
-    parser.add_argument('--baseline_batch', type=int, default=4096, help='Batch size for MF/NCF baseline training')
-    parser.add_argument('--ncf_hidden', type=str, default='128,64', help='Comma-separated hidden layer sizes for NCF MLP')
-    parser.add_argument('--ncf_epochs', type=int, default=3, help='Epochs for NCF fine-tune')
-    parser.add_argument('--ncf_lr', type=float, default=3e-3, help='Learning rate for NCF')
-    parser.add_argument('--ortho_reg', type=float, default=0.0,
-                        help='Weight for orthogonality regularization (0 disables)')
 
 
     return parser.parse_args()
