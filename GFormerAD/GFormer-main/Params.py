@@ -1,5 +1,4 @@
 import argparse
-from email import parser
 
 def ParseArgs():
     parser = argparse.ArgumentParser(description='Model Params')
@@ -42,21 +41,15 @@ def ParseArgs():
     parser.add_argument('--early_stop', type=int, default=0,
                         help='Early stopping patience (0 = disabled). Uses fixed min_delta=0.0005 on Recall.')
     
-    parser.add_argument('--tstEpoch', default=1, type=int, help='number of epoch to test while training')
-    parser.add_argument('--save_path', default='tem', help='file name to save model and training record')
     parser.add_argument('--resume', default=False, action='store_true', help='Resume from latest checkpoint')
     parser.add_argument('--load_weights', type=str, default=None, help='Path to weights file to load for training or eval')
     parser.add_argument('--keep_checkpoints', default=5, type=int, help='Number of regular checkpoints to keep')
     
- 
-
     parser.add_argument('--heating', type=int, default=0, help='Enable curriculum heating (1/0)')
     parser.add_argument('--max_temp', type=float, default=10.0, help='Maximum temperature for curriculum heating')
     parser.add_argument('--min_temp', type=float, default=0.1, help='Minimum temperature for curriculum heating')
     parser.add_argument('--temp_schedule', type=str, default='linear', help='Temperature schedule: linear, exponential, or step')
 
-
-
     return parser.parse_args()
 
-args = ParseArgs()
+args
