@@ -52,4 +52,3 @@ def ParseArgs():
 
     return parser.parse_args()
 
-args
