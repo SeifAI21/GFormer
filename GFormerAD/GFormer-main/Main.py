@@ -224,10 +224,10 @@ class Coach:
 
             # --- 2. Apply temperature scaling and weights uniformly (Original Logic) ---
             T = temperature
-            bpr1 = bpr1_raw * T
+            bpr1 = bpr1_raw 
             bpr2 = bpr2_raw * args.b2 * T
             clLoss = clLoss_raw * T
-            regLoss = regLoss_raw * T
+            regLoss = regLoss_raw 
             distill = distill_raw * self.distill_weight * T
 
             # --- 3. Sum up the final loss ---
