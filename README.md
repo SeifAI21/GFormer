@@ -1,279 +1,83 @@
-# GFormer with Advanced Checkpointing
+# Collaborative Rationale Discovery using Residual Graph Transformer
 
-A Graph Transformer for Recommendation Systems with comprehensive checkpointing and resume functionality.
+This repository contains the official implementation of **Collaborative Rationale Discovery using Residual Graph Transformer** for recommendation systems. It proposes a novel knowledge distillation framework (Teacher-Student) for precise and robust item recommendation.
 
-## 🚀 New Features
+## Architecture
 
-### Advanced Checkpointing System
-- **Automatic checkpoint saving** during training
-- **Resume training** from any checkpoint
-- **Best model tracking** based on performance metrics
-- **Lightweight model weights** for inference
-- **Cloud-friendly** persistent training
+The model uses a Teacher-Student framework designed to disentangle the user-item interaction graph into meaningful structural components:
+- **Rationale Graph**: Represents the core patterns underlying user preferences.
+- **Masked Graph**: Used for self-supervised rationale discovery.
+- **Complement Graph**: Represents independent, auxiliary interaction signals.
 
-## 📋 Table of Contents
+To learn robust representations, the framework employs multiple loss functions:
+- **Recommendation Loss**: BPR loss for predicting user-item interactions.
+- **Distillation Loss**: Aligns the embeddings of the Student network with the Teacher network.
+- **Rationale Discovery Loss**: Ensures the extracted rationale graph captures main predictive signals.
+- **Similarity Loss & Complement Independence Regularization**: Promotes feature disentanglement between the rationale and complement graphs.
 
-1. [Installation](#installation)
-2. [Data Preparation](#data-preparation)
-3. [Training](#training)
-4. [Checkpointing Guide](#checkpointing-guide)
-5. [Resume Training](#resume-training)
-6. [Cloud Usage](#cloud-usage)
-7. [Parameters](#parameters)
+*(Note: Ensure the architecture image provided in the paper is uploaded as `architecture.png` and linked here if applicable.)*
 
-## 🛠️ Installation
+## Requirements
+
+The codebase expects the following dependencies:
+- Python == 3.8.13
+- PyTorch == 1.9.1
+- NumPy == 1.19.2
+- SciPy == 1.9.0
+- NetworkX == 2.8.6
 
 ```bash
-git clone https://github.com/your-username/GFormer.git
-cd GFormer/GFormerAD/GFormer-main
 pip install -r requirements.txt
 ```
 
-## 📊 Data Preparation
+## Datasets
 
-### Using Your Own Dataset
+The implementation supports the following datasets:
+- **Yelp** (`sparse_yelp`)
+- **iFashion** (`ifashion`)
+- **Last.fm** (`lastfm`)
+- **MIND** (`mind`)
+- **Declic**  / **Declic Augmented**
 
-1. **Prepare your data** using the data processing notebook
-2. **Place dataset files** in the correct directory:
-```
-GFormerAD/Datasets/YourDataset/
-├── trnMat.pkl    # Training matrix
-├── tstMat.pkl    # Test matrix
-├── valMat.pkl    # Validation matrix
-└── mappings.pkl  # User/item mappings
-```
+*Note: Please ensure the datasets are unzipped and placed in the `GFormerAD/Datasets/` directory before running the code.*
 
-## 🎯 Training
+## Usage
 
-### Basic Training (From Scratch)
-```bash
-python Main.py --data YourDataset --epoch 100
-```
-
-### Training with Custom Parameters
-```bash
-python Main.py --data YourDataset \
-               --epoch 100 \
-               --lr 0.001 \
-               --batch 4096 \
-               --latdim 64 \
-               --save_path my_model
-```
-
-## 💾 Checkpointing Guide
-
-### What Gets Saved
-
-The checkpointing system saves:
-- ✅ **Model weights** (complete state)
-- ✅ **Optimizer state** (learning rate, momentum, etc.)
-- ✅ **Training progress** (current epoch)
-- ✅ **Best metrics** (best recall, NDCG)
-- ✅ **Training history** (loss curves, performance)
-- ✅ **Hyperparameters** (all configuration)
-
-### File Structure After Training
-
-```
-GFormer-main/
-├── Checkpoints/
-│   ├── checkpoint_epoch_10.pth      # Regular checkpoints
-│   ├── checkpoint_epoch_20.pth
-│   ├── checkpoint_epoch_30.pth
-│   ├── latest_checkpoint.pth        # Always most recent
-│   └── final_checkpoint.pth         # Final model
-├── BestCheckpoints/
-│   └── best_checkpoint_epoch_25.pth # Best performing model
-├── Models/
-│   ├── weights_epoch_20.pth         # Lightweight weights
-│   └── weights_epoch_40.pth
-└── History/
-    └── training_metrics.his         # Training history
-```
-
-### Checkpoint Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--save_freq` | 10 | Save checkpoint every N epochs |
-| `--keep_checkpoints` | 5 | Number of regular checkpoints to keep |
-| `--save_weights_freq` | 20 | Save model weights every N epochs |
-| `--auto_save` | True | Enable automatic checkpoint saving |
-| `--save_best_only` | False | Only save when performance improves |
-
-## 🔄 Resume Training
-
-### Resume from Latest Checkpoint
-```bash
-python Main.py --data YourDataset --epoch 100 --resume
-```
-
-### Resume from Specific Checkpoint
-```bash
-python Main.py --data YourDataset \
-               --epoch 100 \
-               --load_checkpoint Checkpoints/checkpoint_epoch_30.pth
-```
-
-### Resume from Best Checkpoint
-```bash
-python Main.py --data YourDataset --epoch 100 --load_best
-```
-
-### Load Only Model Weights (for Inference)
-```bash
-python Main.py --data YourDataset \
-               --load_checkpoint Models/weights_epoch_50.pth \
-               --epoch 0  # No training, just evaluation
-```
-
-## ☁️ Cloud Usage
-
-Perfect for cloud environments with time limitations!
-
-### Initial Training Session
-```bash
-python Main.py --data YourDataset \
-               --epoch 100 \
-               --save_freq 5 \
-               --keep_checkpoints 10
-```
-
-### When Cloud Session Ends
-1. **Download checkpoint files** from the output
-2. **Start new cloud session**
-3. **Upload checkpoint files** to the new session
-4. **Resume training:**
+Navigate to the main directory and create the required output folders before executing the training script:
 
 ```bash
-python Main.py --data YourDataset --epoch 100 --resume
+cd GFormerAD/GFormer-main
+mkdir -p History Models Checkpoints BestCheckpoints
 ```
 
-### Cloud Pro Tips
-- Set `--save_freq 5` for frequent saves
-- Set `--keep_checkpoints 10` to keep more backups
-- Always download both `latest_checkpoint.pth` and `best_checkpoint_*.pth`
-- Use `--load_best` to resume from the best performing model
+### Training Commands
 
-## 🎛️ Parameters
+Below are the commands to train the model, reflecting the hyperparameter settings used to generate the reported results in the paper.
 
-### Core Training Parameters
+#### Yelp
 ```bash
---data          # Dataset name (e.g., 'YourDataset')
---epoch         # Number of training epochs (default: 100)
---lr            # Learning rate (default: 0.001)
---batch         # Batch size (default: 4096)
---latdim        # Embedding dimension (default: 32)
---gcn_layer     # Number of GCN layers (default: 2)
---gt_layer      # Number of Graph Transformer layers (default: 1)
---save_path     # Model save name (default: 'tem')
+python Main.py --data yelp --reg 1e-4 --ssl_reg 1 --gcn 3 --ctra 1e-3 --b2 1 --pnn 1
 ```
 
-### Checkpointing Parameters
+#### iFashion
 ```bash
---resume                # Resume from latest checkpoint
---load_checkpoint PATH  # Load specific checkpoint file
---load_best            # Load best checkpoint instead of latest
---save_freq N          # Save checkpoint every N epochs (default: 10)
---keep_checkpoints N   # Keep N regular checkpoints (default: 5)
---save_weights_freq N  # Save weights every N epochs (default: 20)
---auto_save            # Enable automatic checkpointing (default: True)
---save_best_only       # Only save when performance improves
+python Main.py --data ifashion --reg 1e-5 --ssl_reg 1 --gcn 2 --ctra 1e-3 --b2 1 --pnn 1
 ```
 
-### Advanced Parameters
+#### Last.fm
 ```bash
---ssl_reg       # Contrastive regularization (default: 1)
---reg           # Weight decay regularization (default: 1e-4)
---topk          # Top-K for evaluation (default: 40)
---tstEpoch      # Test every N epochs (default: 1)
---gpu           # GPU ID to use (default: '0')
+python Main.py --data lastfm --reg 1e-4 --ssl_reg 1 --gcn 2 --ctra 1e-3 --b2 1e-6 --pnn 2
 ```
 
-## 📈 Example Training Workflows
+## Advanced Training Features
 
-### 1. Quick Experimentation
+This repository includes a comprehensive Checkpointing and Resume mechanism:
+- **Automatic Checkpoint Saving**: Periodically saves the model's parameters and optimizer states in the `Checkpoints/` folder.
+- **Best Model Tracking**: Automatically evaluates and stores the best-performing model (based on Recall/NDCG) in `BestCheckpoints/`.
+- **Training Resume**: Use the `--resume` flag or specify a path via `--load_weights` to resume interrupted runs or initialize from a pre-trained model.
+
+Example of resuming training:
 ```bash
-python Main.py --data YourDataset --epoch 50 --save_freq 10
+python Main.py --data yelp --resume True
 ```
 
-### 2. Long Training with Frequent Saves
-```bash
-python Main.py --data YourDataset \
-               --epoch 200 \
-               --save_freq 5 \
-               --keep_checkpoints 20
-```
-
-### 3. Resume Long Training
-```bash
-python Main.py --data YourDataset \
-               --epoch 200 \
-               --resume
-```
-
-### 4. Fine-tuning from Best Model
-```bash
-python Main.py --data YourDataset \
-               --epoch 50 \
-               --load_best \
-               --lr 0.0001  # Lower learning rate for fine-tuning
-```
-
-## 🔧 Troubleshooting
-
-### Common Issues
-
-**1. Checkpoint not found**
-```bash
-# Check if checkpoint exists
-ls Checkpoints/
-# Use absolute path if needed
---load_checkpoint /full/path/to/checkpoint.pth
-```
-
-**2. CUDA out of memory**
-```bash
-# Reduce batch size
---batch 2048
-# Or reduce embedding dimension
---latdim 16
-```
-
-**3. Resume training from wrong epoch**
-```bash
-# Check checkpoint epoch
-python -c "import torch; print(torch.load('Checkpoints/latest_checkpoint.pth')['epoch'])"
-```
-
-### File Size Management
-
-**Large checkpoint files?**
-```bash
-# Use save_best_only to reduce storage
---save_best_only
-# Or reduce checkpoint frequency
---save_freq 20
-```
-
-## 🏁 Getting Started
-
-1. **Clone the repository**
-2. **Prepare your dataset** (see Data Preparation)
-3. **Start training:**
-   ```bash
-   python Main.py --data YourDataset --epoch 100
-   ```
-4. **Monitor training** and checkpoints will be saved automatically
-5. **Resume anytime** with `--resume` if interrupted
-
-## 📧 Support
-
-For questions or issues:
-- Open an issue on GitHub
-- Check the troubleshooting section
-- Review the parameter descriptions
-
----
-
-**Happy Training! 🚀**
