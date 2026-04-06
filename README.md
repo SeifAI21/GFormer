@@ -15,7 +15,7 @@ To learn robust representations, the framework employs multiple loss functions:
 - **Rationale Discovery Loss**: Ensures the extracted rationale graph captures main predictive signals.
 - **Similarity Loss & Complement Independence Regularization**: Promotes feature disentanglement between the rationale and complement graphs.
 
-*(Note: Ensure the architecture image provided in the paper is uploaded as `architecture.png` and linked here if applicable.)*
+![Architecture Framework](architecture.png)
 
 ## Requirements
 
@@ -80,4 +80,8 @@ Example of resuming training:
 ```bash
 python Main.py --data yelp --resume True
 ```
+
+## Pre-Trained Weights
+
+Pre-trained model weights could be sent upon request.
 
